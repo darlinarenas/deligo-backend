@@ -1,0 +1,17 @@
+[
+  {
+    "id": "user_1776478752674_3331",
+    "fullName": "Enrique Arenas",
+    "address": "Los Maitenes 1358",
+    "phone": "958305732",
+    "email": "darlin699@gmail.com",
+    "password": "123",
+    "role": "customer",
+    "reference": "",
+    "location": {
+      "lat": "",
+      "lng": ""
+    },
+    "createdAt": "2026-04-18T02:19:12.674Z"
+  }
+]

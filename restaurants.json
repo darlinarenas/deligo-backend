@@ -1,0 +1,42 @@
+[
+  {
+    "id": "restaurant_1776478567595_4367",
+    "name": "R-10 Restaurant",
+    "address": "Los Maitenes 1358",
+    "phone": "958305732",
+    "email": "r10@gmail.com",
+    "password": "123",
+    "role": "restaurant",
+    "createdAt": "2026-04-18T02:16:07.595Z",
+    "status": "approved",
+    "updatedAt": "2026-04-26T19:07:22.645Z",
+    "commission": 30,
+    "commissionPercent": 30
+  },
+  {
+    "id": "restaurant_1777152724374_1711",
+    "name": "Mango",
+    "address": "Altos del Valle 1325",
+    "phone": "35165165156",
+    "email": "mango@gmail.com",
+    "password": "123",
+    "role": "restaurant",
+    "createdAt": "2026-04-25T21:32:04.375Z",
+    "status": "approved",
+    "updatedAt": "2026-04-25T23:38:40.496Z"
+  },
+  {
+    "id": "restaurant_1777239085174_9255",
+    "name": "medanos",
+    "address": "Altos del Valle",
+    "phone": "9583",
+    "email": "medanos@gmail.com",
+    "password": "123",
+    "role": "restaurant",
+    "status": "approved",
+    "commission": 20,
+    "createdAt": "2026-04-26T21:31:25.175Z",
+    "commissionPercent": 20,
+    "updatedAt": "2026-04-26T21:33:18.563Z"
+  }
+]

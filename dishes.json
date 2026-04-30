@@ -1,0 +1,58 @@
+[
+  {
+    "id": "dish_1777245927832_1685",
+    "restaurantEmail": "medanos@gmail.com",
+    "restaurantName": "medanos",
+    "restaurantAddress": "Altos del Valle",
+    "name": "Pizza en Cono",
+    "price": 5225,
+    "description": "strgbstrsh",
+    "category": "Pollo",
+    "prepTime": "42",
+    "emoji": "",
+    "available": true,
+    "createdAt": "2026-04-26T23:25:27.834Z"
+  },
+  {
+    "id": "dish_1777251148588_8518",
+    "restaurantEmail": "r10@gmail.com",
+    "restaurantName": "R-10 Restaurant",
+    "restaurantAddress": "Los Maitenes 1358",
+    "name": "PAPAS CHEDAR",
+    "price": 5000,
+    "description": "papas con cgedar",
+    "category": "Papas",
+    "prepTime": "7",
+    "emoji": "",
+    "available": true,
+    "createdAt": "2026-04-27T00:52:28.589Z"
+  },
+  {
+    "id": "dish_1777251173351_5645",
+    "restaurantEmail": "r10@gmail.com",
+    "restaurantName": "R-10 Restaurant",
+    "restaurantAddress": "Los Maitenes 1358",
+    "name": "Alitas de pollo",
+    "price": 5587,
+    "description": "alitas fritas",
+    "category": "Pollo",
+    "prepTime": "55",
+    "emoji": "",
+    "available": true,
+    "createdAt": "2026-04-27T00:52:53.351Z"
+  },
+  {
+    "id": "dish_1777251205663_3140",
+    "restaurantEmail": "r10@gmail.com",
+    "restaurantName": "R-10 Restaurant",
+    "restaurantAddress": "Los Maitenes 1358",
+    "name": "perro caliente",
+    "price": 2500,
+    "description": "perro mediano",
+    "category": "Perros Calientes",
+    "prepTime": "20",
+    "emoji": "",
+    "available": true,
+    "createdAt": "2026-04-27T00:53:25.663Z"
+  }
+]
