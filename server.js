@@ -757,6 +757,255 @@ app.patch("/admin/restaurantes/:id/estado", (req, res) => {
 
 
 
+
+/* ======================================================
+   ADMIN USUARIOS - EDITAR USUARIO
+   Guarda cambios reales en users.json.
+   Si cambia el correo, actualiza también los pedidos del cliente.
+====================================================== */
+app.patch("/admin/users/:id", (req, res) => {
+  const users = readJsonArrayFile(USERS_FILE);
+  const orders = readJsonArrayFile(ORDERS_FILE);
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+  const userId = String(req.params.id || "").trim();
+
+  if (!userId) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID de usuario requerido"
+    });
+  }
+
+  const index = users.findIndex((user) => {
+    return (
+      String(user.id || "").trim() === userId ||
+      normalizeEmail(user.email) === normalizeEmail(userId)
+    );
+  });
+
+  if (index === -1) {
+    return res.status(404).json({
+      ok: false,
+      message: "Usuario no encontrado"
+    });
+  }
+
+  const currentUser = users[index];
+  const oldEmail = normalizeEmail(currentUser.email);
+  const body = req.body || {};
+  const newEmail = normalizeEmail(body.email ?? currentUser.email);
+
+  if (!newEmail) {
+    return res.status(400).json({
+      ok: false,
+      message: "El correo del usuario es obligatorio"
+    });
+  }
+
+  const emailExistsInUsers = users.some((user, i) => {
+    return i !== index && normalizeEmail(user.email) === newEmail;
+  });
+
+  const emailExistsInRestaurants = restaurants.some((restaurant) => {
+    return normalizeEmail(restaurant.email) === newEmail;
+  });
+
+  if (emailExistsInUsers || emailExistsInRestaurants) {
+    return res.status(409).json({
+      ok: false,
+      message: "Ese correo ya está registrado"
+    });
+  }
+
+  const updatedUser = {
+    ...currentUser,
+    fullName: body.fullName != null ? normalizeText(body.fullName) : currentUser.fullName,
+    name: body.fullName != null ? normalizeText(body.fullName) : currentUser.name,
+    email: newEmail,
+    phone: body.phone != null ? normalizeText(body.phone) : currentUser.phone,
+    address: body.address != null ? normalizeText(body.address) : currentUser.address,
+    reference: body.reference != null ? normalizeText(body.reference) : currentUser.reference,
+    location: {
+      lat: body.location?.lat ?? currentUser.location?.lat ?? "",
+      lng: body.location?.lng ?? currentUser.location?.lng ?? ""
+    },
+    updatedAt: new Date().toISOString()
+  };
+
+  if (body.password != null && String(body.password).trim()) {
+    updatedUser.password = String(body.password);
+  }
+
+  users[index] = updatedUser;
+
+  if (oldEmail && newEmail && oldEmail !== newEmail) {
+    orders.forEach((order) => {
+      if (normalizeEmail(order.customer?.email) === oldEmail) {
+        order.customer = {
+          ...(order.customer || {}),
+          email: newEmail,
+          fullName: updatedUser.fullName || order.customer?.fullName || "",
+          phone: updatedUser.phone || order.customer?.phone || "",
+          address: updatedUser.address || order.customer?.address || ""
+        };
+        order.updatedAt = new Date().toISOString();
+      }
+    });
+
+    writeJsonArrayFile(ORDERS_FILE, orders);
+  }
+
+  writeJsonArrayFile(USERS_FILE, users);
+
+  res.json({
+    ok: true,
+    message: "Usuario actualizado correctamente",
+    user: updatedUser
+  });
+});
+
+/* ======================================================
+   ADMIN RESTAURANTES - EDITAR RESTAURANTE
+   Guarda cambios reales en restaurants.json.
+   Si cambia el correo, migra dishes.json y orders.json.
+====================================================== */
+app.patch("/admin/restaurantes/:id", (req, res) => {
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+  const users = readJsonArrayFile(USERS_FILE);
+  const dishes = readJsonArrayFile(DISHES_FILE);
+  const orders = readJsonArrayFile(ORDERS_FILE);
+  const restaurantId = String(req.params.id || "").trim();
+
+  if (!restaurantId) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID de restaurante requerido"
+    });
+  }
+
+  const index = restaurants.findIndex((restaurant) => {
+    return (
+      String(restaurant.id || "").trim() === restaurantId ||
+      normalizeEmail(restaurant.email) === normalizeEmail(restaurantId)
+    );
+  });
+
+  if (index === -1) {
+    return res.status(404).json({
+      ok: false,
+      message: "Restaurante no encontrado"
+    });
+  }
+
+  const currentRestaurant = restaurants[index];
+  const oldEmail = normalizeEmail(currentRestaurant.email);
+  const body = req.body || {};
+  const newEmail = normalizeEmail(body.email ?? currentRestaurant.email);
+  let status = String(body.status ?? currentRestaurant.status ?? "pending").trim().toLowerCase();
+
+  if (status === "paused") status = "blocked";
+
+  const validStatuses = ["pending", "approved", "blocked"];
+
+  if (!newEmail) {
+    return res.status(400).json({
+      ok: false,
+      message: "El correo del restaurante es obligatorio"
+    });
+  }
+
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({
+      ok: false,
+      message: "Estado inválido"
+    });
+  }
+
+  const emailExistsInRestaurants = restaurants.some((restaurant, i) => {
+    return i !== index && normalizeEmail(restaurant.email) === newEmail;
+  });
+
+  const emailExistsInUsers = users.some((user) => {
+    return normalizeEmail(user.email) === newEmail;
+  });
+
+  if (emailExistsInRestaurants || emailExistsInUsers) {
+    return res.status(409).json({
+      ok: false,
+      message: "Ese correo ya está registrado"
+    });
+  }
+
+  const commissionPercent = Number(
+    body.commissionPercent ??
+    body.commission ??
+    currentRestaurant.commissionPercent ??
+    currentRestaurant.commission ??
+    15
+  );
+
+  if (Number.isNaN(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
+    return res.status(400).json({
+      ok: false,
+      message: "La comisión debe estar entre 0 y 100"
+    });
+  }
+
+  const updatedRestaurant = {
+    ...currentRestaurant,
+    name: body.name != null ? normalizeText(body.name) : currentRestaurant.name,
+    email: newEmail,
+    phone: body.phone != null ? normalizeText(body.phone) : currentRestaurant.phone,
+    address: body.address != null ? normalizeText(body.address) : currentRestaurant.address,
+    category: body.category != null ? normalizeText(body.category) : currentRestaurant.category,
+    description: body.description != null ? normalizeText(body.description) : currentRestaurant.description,
+    status,
+    commission: commissionPercent,
+    commissionPercent,
+    updatedAt: new Date().toISOString()
+  };
+
+  if (body.password != null && String(body.password).trim()) {
+    updatedRestaurant.password = String(body.password);
+  }
+
+  restaurants[index] = updatedRestaurant;
+
+  dishes.forEach((dish) => {
+    if (normalizeEmail(dish.restaurantEmail) === oldEmail || normalizeEmail(dish.restaurantEmail) === newEmail) {
+      dish.restaurantEmail = newEmail;
+      dish.restaurantName = updatedRestaurant.name || dish.restaurantName;
+      dish.restaurantAddress = updatedRestaurant.address || dish.restaurantAddress;
+      dish.updatedAt = new Date().toISOString();
+    }
+  });
+
+  orders.forEach((order) => {
+    if (normalizeEmail(order.restaurantEmail) === oldEmail || normalizeEmail(order.restaurantEmail) === newEmail) {
+      order.restaurantEmail = newEmail;
+      order.restaurantName = updatedRestaurant.name || order.restaurantName;
+      order.restaurant = {
+        ...(order.restaurant || {}),
+        email: newEmail,
+        name: updatedRestaurant.name || order.restaurant?.name || order.restaurantName || "Restaurante",
+        id: updatedRestaurant.id || order.restaurant?.id || ""
+      };
+      order.updatedAt = new Date().toISOString();
+    }
+  });
+
+  writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
+  writeJsonArrayFile(DISHES_FILE, dishes);
+  writeJsonArrayFile(ORDERS_FILE, orders);
+
+  res.json({
+    ok: true,
+    message: "Restaurante actualizado correctamente",
+    restaurant: updatedRestaurant
+  });
+});
+
+
 /* ======================================================
    ADMIN RESTAURANTES - ELIMINAR RESTAURANTE
 ====================================================== */
@@ -953,6 +1202,11 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
+
+
+
+
 
 
 
