@@ -6,49 +6,28 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = 3001;
 
 const ORDERS_FILE = path.join(__dirname, "orders.json");
 const USERS_FILE = path.join(__dirname, "users.json");
 const RESTAURANTS_FILE = path.join(__dirname, "restaurants.json");
 const DISHES_FILE = path.join(__dirname, "dishes.json");
 const ADMINS_FILE = path.join(__dirname, "admins.json");
-const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 
-/* ======================================================
-   CORS DEFINITIVO PARA FRONTEND EN VERCEL
-   - Necesario porque el frontend usa credentials: "include".
-   - NO se puede usar origin: "*" con cookies.
-   - El backend debe responder con el origen exacto permitido.
-====================================================== */
-const ALLOWED_ORIGINS = [
-  "https://deli-go-frontend-gamma.vercel.app",
-  "https://deli-go.netlify.app",
-  "http://localhost:5500",
-  "http://127.0.0.1:5500"
-];
-
-const corsOptions = {
-  origin(origin, callback) {
-    // Permite herramientas como Postman, navegador directo o health checks sin Origin.
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (ALLOWED_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-
-    return callback(new Error("Origen no permitido por CORS: " + origin));
-  },
-  credentials: true,
+app.use(cors({
+  origin: [
+    "https://deli-go-frontend-gamma.vercel.app",
+    "https://deli-go-frontend-wheat.vercel.app",
+    "https://deli-go-frontend-ehvy3lg9j-vexhora.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:5500"
+  ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
-  optionsSuccessStatus: 204
-};
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true
+}));
 
-app.set("trust proxy", 1);
-app.use(cors(corsOptions));
 app.use(express.json());
 
 function ensureFileExists(filePath) {
@@ -77,29 +56,6 @@ function writeJsonArrayFile(filePath, data) {
   }
 }
 
-function readJsonObjectFile(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, "{}", "utf-8");
-    }
-
-    const raw = fs.readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch (error) {
-    console.error("Error leyendo archivo objeto:", filePath, error);
-    return {};
-  }
-}
-
-function writeJsonObjectFile(filePath, data) {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-  } catch (error) {
-    console.error("Error guardando archivo objeto:", filePath, error);
-  }
-}
-
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -112,88 +68,6 @@ function generateId(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
-function parseCookies(req) {
-  const header = req.headers.cookie || "";
-
-  return header.split(";").reduce((acc, part) => {
-    const index = part.indexOf("=");
-    if (index === -1) return acc;
-
-    const key = decodeURIComponent(part.slice(0, index).trim());
-    const value = decodeURIComponent(part.slice(index + 1).trim());
-
-    if (key) acc[key] = value;
-    return acc;
-  }, {});
-}
-
-function createSession(res, user, type = "user") {
-  const sessions = readJsonObjectFile(SESSIONS_FILE);
-  const sessionId = generateId("session");
-
-  sessions[sessionId] = {
-    id: sessionId,
-    type,
-    email: normalizeEmail(user.email),
-    role: user.role || type,
-    createdAt: new Date().toISOString()
-  };
-
-  writeJsonObjectFile(SESSIONS_FILE, sessions);
-
-  res.cookie("deli_session", sessionId, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: 1000 * 60 * 60 * 24 * 7
-  });
-
-  return sessionId;
-}
-
-function clearSession(req, res) {
-  const cookies = parseCookies(req);
-  const sessionId = cookies.deli_session;
-
-  if (sessionId) {
-    const sessions = readJsonObjectFile(SESSIONS_FILE);
-    delete sessions[sessionId];
-    writeJsonObjectFile(SESSIONS_FILE, sessions);
-  }
-
-  res.clearCookie("deli_session", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none"
-  });
-}
-
-function getSessionUser(req) {
-  const cookies = parseCookies(req);
-  const sessionId = cookies.deli_session;
-  if (!sessionId) return null;
-
-  const sessions = readJsonObjectFile(SESSIONS_FILE);
-  const session = sessions[sessionId];
-  if (!session) return null;
-
-  if (session.type === "admin") {
-    const admins = readJsonArrayFile(ADMINS_FILE);
-    const admin = admins.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
-    return admin ? { type: "admin", user: admin } : null;
-  }
-
-  if (session.role === "restaurant") {
-    const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-    const restaurant = restaurants.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
-    return restaurant ? { type: "user", user: { ...restaurant, role: "restaurant" } } : null;
-  }
-
-  const users = readJsonArrayFile(USERS_FILE);
-  const user = users.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
-  return user ? { type: "user", user: { ...user, role: "customer" } } : null;
-}
-
 /* ======================================================
    RUTAS DE PRUEBA
 ====================================================== */
@@ -201,33 +75,6 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: "Backend de DeliFoods funcionando"
-  });
-});
-
-app.get("/session", (req, res) => {
-  const session = getSessionUser(req);
-
-  if (!session) {
-    return res.status(401).json({
-      ok: false,
-      message: "No hay sesión activa"
-    });
-  }
-
-  res.json({
-    ok: true,
-    type: session.type,
-    user: session.user,
-    admin: session.type === "admin" ? session.user : null
-  });
-});
-
-app.post("/logout", (req, res) => {
-  clearSession(req, res);
-
-  res.json({
-    ok: true,
-    message: "Sesión cerrada"
   });
 });
 
@@ -630,13 +477,10 @@ app.post("/login", (req, res) => {
       });
     }
 
-    const sessionUser = { ...restaurant, role: "restaurant" };
-    createSession(res, sessionUser, "user");
-
     return res.json({
       ok: true,
       message: "Login correcto",
-      user: sessionUser
+      user: restaurant
     });
   }
 
@@ -653,13 +497,10 @@ app.post("/login", (req, res) => {
     });
   }
 
-  const sessionUser = { ...user, role: "customer" };
-  createSession(res, sessionUser, "user");
-
   res.json({
     ok: true,
     message: "Login correcto",
-    user: sessionUser
+    user
   });
 });
 
@@ -844,8 +685,6 @@ app.post("/admin/login", (req, res) => {
     });
   }
 
-  createSession(res, { ...admin, role: "admin" }, "admin");
-
   res.json({
     ok: true,
     message: "Login admin correcto",
@@ -929,255 +768,6 @@ app.patch("/admin/restaurantes/:id/estado", (req, res) => {
   });
 });
 
-
-
-
-/* ======================================================
-   ADMIN USUARIOS - EDITAR USUARIO
-   Guarda cambios reales en users.json.
-   Si cambia el correo, actualiza también los pedidos del cliente.
-====================================================== */
-app.patch("/admin/users/:id", (req, res) => {
-  const users = readJsonArrayFile(USERS_FILE);
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-  const userId = String(req.params.id || "").trim();
-
-  if (!userId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de usuario requerido"
-    });
-  }
-
-  const index = users.findIndex((user) => {
-    return (
-      String(user.id || "").trim() === userId ||
-      normalizeEmail(user.email) === normalizeEmail(userId)
-    );
-  });
-
-  if (index === -1) {
-    return res.status(404).json({
-      ok: false,
-      message: "Usuario no encontrado"
-    });
-  }
-
-  const currentUser = users[index];
-  const oldEmail = normalizeEmail(currentUser.email);
-  const body = req.body || {};
-  const newEmail = normalizeEmail(body.email ?? currentUser.email);
-
-  if (!newEmail) {
-    return res.status(400).json({
-      ok: false,
-      message: "El correo del usuario es obligatorio"
-    });
-  }
-
-  const emailExistsInUsers = users.some((user, i) => {
-    return i !== index && normalizeEmail(user.email) === newEmail;
-  });
-
-  const emailExistsInRestaurants = restaurants.some((restaurant) => {
-    return normalizeEmail(restaurant.email) === newEmail;
-  });
-
-  if (emailExistsInUsers || emailExistsInRestaurants) {
-    return res.status(409).json({
-      ok: false,
-      message: "Ese correo ya está registrado"
-    });
-  }
-
-  const updatedUser = {
-    ...currentUser,
-    fullName: body.fullName != null ? normalizeText(body.fullName) : currentUser.fullName,
-    name: body.fullName != null ? normalizeText(body.fullName) : currentUser.name,
-    email: newEmail,
-    phone: body.phone != null ? normalizeText(body.phone) : currentUser.phone,
-    address: body.address != null ? normalizeText(body.address) : currentUser.address,
-    reference: body.reference != null ? normalizeText(body.reference) : currentUser.reference,
-    location: {
-      lat: body.location?.lat ?? currentUser.location?.lat ?? "",
-      lng: body.location?.lng ?? currentUser.location?.lng ?? ""
-    },
-    updatedAt: new Date().toISOString()
-  };
-
-  if (body.password != null && String(body.password).trim()) {
-    updatedUser.password = String(body.password);
-  }
-
-  users[index] = updatedUser;
-
-  if (oldEmail && newEmail && oldEmail !== newEmail) {
-    orders.forEach((order) => {
-      if (normalizeEmail(order.customer?.email) === oldEmail) {
-        order.customer = {
-          ...(order.customer || {}),
-          email: newEmail,
-          fullName: updatedUser.fullName || order.customer?.fullName || "",
-          phone: updatedUser.phone || order.customer?.phone || "",
-          address: updatedUser.address || order.customer?.address || ""
-        };
-        order.updatedAt = new Date().toISOString();
-      }
-    });
-
-    writeJsonArrayFile(ORDERS_FILE, orders);
-  }
-
-  writeJsonArrayFile(USERS_FILE, users);
-
-  res.json({
-    ok: true,
-    message: "Usuario actualizado correctamente",
-    user: updatedUser
-  });
-});
-
-/* ======================================================
-   ADMIN RESTAURANTES - EDITAR RESTAURANTE
-   Guarda cambios reales en restaurants.json.
-   Si cambia el correo, migra dishes.json y orders.json.
-====================================================== */
-app.patch("/admin/restaurantes/:id", (req, res) => {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-  const users = readJsonArrayFile(USERS_FILE);
-  const dishes = readJsonArrayFile(DISHES_FILE);
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  const restaurantId = String(req.params.id || "").trim();
-
-  if (!restaurantId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de restaurante requerido"
-    });
-  }
-
-  const index = restaurants.findIndex((restaurant) => {
-    return (
-      String(restaurant.id || "").trim() === restaurantId ||
-      normalizeEmail(restaurant.email) === normalizeEmail(restaurantId)
-    );
-  });
-
-  if (index === -1) {
-    return res.status(404).json({
-      ok: false,
-      message: "Restaurante no encontrado"
-    });
-  }
-
-  const currentRestaurant = restaurants[index];
-  const oldEmail = normalizeEmail(currentRestaurant.email);
-  const body = req.body || {};
-  const newEmail = normalizeEmail(body.email ?? currentRestaurant.email);
-  let status = String(body.status ?? currentRestaurant.status ?? "pending").trim().toLowerCase();
-
-  if (status === "paused") status = "blocked";
-
-  const validStatuses = ["pending", "approved", "blocked"];
-
-  if (!newEmail) {
-    return res.status(400).json({
-      ok: false,
-      message: "El correo del restaurante es obligatorio"
-    });
-  }
-
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({
-      ok: false,
-      message: "Estado inválido"
-    });
-  }
-
-  const emailExistsInRestaurants = restaurants.some((restaurant, i) => {
-    return i !== index && normalizeEmail(restaurant.email) === newEmail;
-  });
-
-  const emailExistsInUsers = users.some((user) => {
-    return normalizeEmail(user.email) === newEmail;
-  });
-
-  if (emailExistsInRestaurants || emailExistsInUsers) {
-    return res.status(409).json({
-      ok: false,
-      message: "Ese correo ya está registrado"
-    });
-  }
-
-  const commissionPercent = Number(
-    body.commissionPercent ??
-    body.commission ??
-    currentRestaurant.commissionPercent ??
-    currentRestaurant.commission ??
-    15
-  );
-
-  if (Number.isNaN(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
-    return res.status(400).json({
-      ok: false,
-      message: "La comisión debe estar entre 0 y 100"
-    });
-  }
-
-  const updatedRestaurant = {
-    ...currentRestaurant,
-    name: body.name != null ? normalizeText(body.name) : currentRestaurant.name,
-    email: newEmail,
-    phone: body.phone != null ? normalizeText(body.phone) : currentRestaurant.phone,
-    address: body.address != null ? normalizeText(body.address) : currentRestaurant.address,
-    category: body.category != null ? normalizeText(body.category) : currentRestaurant.category,
-    description: body.description != null ? normalizeText(body.description) : currentRestaurant.description,
-    status,
-    commission: commissionPercent,
-    commissionPercent,
-    updatedAt: new Date().toISOString()
-  };
-
-  if (body.password != null && String(body.password).trim()) {
-    updatedRestaurant.password = String(body.password);
-  }
-
-  restaurants[index] = updatedRestaurant;
-
-  dishes.forEach((dish) => {
-    if (normalizeEmail(dish.restaurantEmail) === oldEmail || normalizeEmail(dish.restaurantEmail) === newEmail) {
-      dish.restaurantEmail = newEmail;
-      dish.restaurantName = updatedRestaurant.name || dish.restaurantName;
-      dish.restaurantAddress = updatedRestaurant.address || dish.restaurantAddress;
-      dish.updatedAt = new Date().toISOString();
-    }
-  });
-
-  orders.forEach((order) => {
-    if (normalizeEmail(order.restaurantEmail) === oldEmail || normalizeEmail(order.restaurantEmail) === newEmail) {
-      order.restaurantEmail = newEmail;
-      order.restaurantName = updatedRestaurant.name || order.restaurantName;
-      order.restaurant = {
-        ...(order.restaurant || {}),
-        email: newEmail,
-        name: updatedRestaurant.name || order.restaurant?.name || order.restaurantName || "Restaurante",
-        id: updatedRestaurant.id || order.restaurant?.id || ""
-      };
-      order.updatedAt = new Date().toISOString();
-    }
-  });
-
-  writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
-  writeJsonArrayFile(DISHES_FILE, dishes);
-  writeJsonArrayFile(ORDERS_FILE, orders);
-
-  res.json({
-    ok: true,
-    message: "Restaurante actualizado correctamente",
-    restaurant: updatedRestaurant
-  });
-});
 
 
 /* ======================================================
@@ -1376,6 +966,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
