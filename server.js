@@ -13,8 +13,42 @@ const USERS_FILE = path.join(__dirname, "users.json");
 const RESTAURANTS_FILE = path.join(__dirname, "restaurants.json");
 const DISHES_FILE = path.join(__dirname, "dishes.json");
 const ADMINS_FILE = path.join(__dirname, "admins.json");
+const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 
-app.use(cors());
+/* ======================================================
+   CORS DEFINITIVO PARA FRONTEND EN VERCEL
+   - Necesario porque el frontend usa credentials: "include".
+   - NO se puede usar origin: "*" con cookies.
+   - El backend debe responder con el origen exacto permitido.
+====================================================== */
+const ALLOWED_ORIGINS = [
+  "https://deli-go-frontend-gamma.vercel.app",
+  "https://deli-go.netlify.app",
+  "http://localhost:5500",
+  "http://127.0.0.1:5500"
+];
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Permite herramientas como Postman, navegador directo o health checks sin Origin.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Origen no permitido por CORS: " + origin));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204
+};
+
+app.set("trust proxy", 1);
+app.use(cors(corsOptions));
 app.use(express.json());
 
 function ensureFileExists(filePath) {
@@ -43,6 +77,29 @@ function writeJsonArrayFile(filePath, data) {
   }
 }
 
+function readJsonObjectFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, "{}", "utf-8");
+    }
+
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.error("Error leyendo archivo objeto:", filePath, error);
+    return {};
+  }
+}
+
+function writeJsonObjectFile(filePath, data) {
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+  } catch (error) {
+    console.error("Error guardando archivo objeto:", filePath, error);
+  }
+}
+
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -55,6 +112,88 @@ function generateId(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+
+  return header.split(";").reduce((acc, part) => {
+    const index = part.indexOf("=");
+    if (index === -1) return acc;
+
+    const key = decodeURIComponent(part.slice(0, index).trim());
+    const value = decodeURIComponent(part.slice(index + 1).trim());
+
+    if (key) acc[key] = value;
+    return acc;
+  }, {});
+}
+
+function createSession(res, user, type = "user") {
+  const sessions = readJsonObjectFile(SESSIONS_FILE);
+  const sessionId = generateId("session");
+
+  sessions[sessionId] = {
+    id: sessionId,
+    type,
+    email: normalizeEmail(user.email),
+    role: user.role || type,
+    createdAt: new Date().toISOString()
+  };
+
+  writeJsonObjectFile(SESSIONS_FILE, sessions);
+
+  res.cookie("deli_session", sessionId, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    maxAge: 1000 * 60 * 60 * 24 * 7
+  });
+
+  return sessionId;
+}
+
+function clearSession(req, res) {
+  const cookies = parseCookies(req);
+  const sessionId = cookies.deli_session;
+
+  if (sessionId) {
+    const sessions = readJsonObjectFile(SESSIONS_FILE);
+    delete sessions[sessionId];
+    writeJsonObjectFile(SESSIONS_FILE, sessions);
+  }
+
+  res.clearCookie("deli_session", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none"
+  });
+}
+
+function getSessionUser(req) {
+  const cookies = parseCookies(req);
+  const sessionId = cookies.deli_session;
+  if (!sessionId) return null;
+
+  const sessions = readJsonObjectFile(SESSIONS_FILE);
+  const session = sessions[sessionId];
+  if (!session) return null;
+
+  if (session.type === "admin") {
+    const admins = readJsonArrayFile(ADMINS_FILE);
+    const admin = admins.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
+    return admin ? { type: "admin", user: admin } : null;
+  }
+
+  if (session.role === "restaurant") {
+    const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+    const restaurant = restaurants.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
+    return restaurant ? { type: "user", user: { ...restaurant, role: "restaurant" } } : null;
+  }
+
+  const users = readJsonArrayFile(USERS_FILE);
+  const user = users.find((item) => normalizeEmail(item.email) === normalizeEmail(session.email));
+  return user ? { type: "user", user: { ...user, role: "customer" } } : null;
+}
+
 /* ======================================================
    RUTAS DE PRUEBA
 ====================================================== */
@@ -62,6 +201,33 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: "Backend de DeliFoods funcionando"
+  });
+});
+
+app.get("/session", (req, res) => {
+  const session = getSessionUser(req);
+
+  if (!session) {
+    return res.status(401).json({
+      ok: false,
+      message: "No hay sesión activa"
+    });
+  }
+
+  res.json({
+    ok: true,
+    type: session.type,
+    user: session.user,
+    admin: session.type === "admin" ? session.user : null
+  });
+});
+
+app.post("/logout", (req, res) => {
+  clearSession(req, res);
+
+  res.json({
+    ok: true,
+    message: "Sesión cerrada"
   });
 });
 
@@ -464,10 +630,13 @@ app.post("/login", (req, res) => {
       });
     }
 
+    const sessionUser = { ...restaurant, role: "restaurant" };
+    createSession(res, sessionUser, "user");
+
     return res.json({
       ok: true,
       message: "Login correcto",
-      user: restaurant
+      user: sessionUser
     });
   }
 
@@ -484,10 +653,13 @@ app.post("/login", (req, res) => {
     });
   }
 
+  const sessionUser = { ...user, role: "customer" };
+  createSession(res, sessionUser, "user");
+
   res.json({
     ok: true,
     message: "Login correcto",
-    user
+    user: sessionUser
   });
 });
 
@@ -671,6 +843,8 @@ app.post("/admin/login", (req, res) => {
       message: "Credenciales inválidas"
     });
   }
+
+  createSession(res, { ...admin, role: "admin" }, "admin");
 
   res.json({
     ok: true,
@@ -1202,6 +1376,9 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
+
+
 
 
 
