@@ -69,6 +69,66 @@ function generateId(prefix = "id") {
 }
 
 /* ======================================================
+   SESIONES EN MEMORIA
+   - Permite login real con cookie HTTP-only
+   - Soporta /session para cliente, restaurante y admin
+   - No usa localStorage como fuente de sesión
+====================================================== */
+const ACTIVE_SESSIONS = {};
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+
+  return header.split(";").reduce((cookies, part) => {
+    const [key, ...valueParts] = part.trim().split("=");
+
+    if (!key) return cookies;
+
+    cookies[key] = decodeURIComponent(valueParts.join("=") || "");
+    return cookies;
+  }, {});
+}
+
+function createSession(res, user) {
+  const token = generateId("session");
+
+  ACTIVE_SESSIONS[token] = {
+    ...user,
+    createdAt: new Date().toISOString()
+  };
+
+  res.setHeader(
+    "Set-Cookie",
+    `deli_session=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=86400`
+  );
+
+  return token;
+}
+
+function getSessionUser(req) {
+  const cookies = parseCookies(req);
+  const token = cookies.deli_session;
+
+  if (!token) return null;
+
+  return ACTIVE_SESSIONS[token] || null;
+}
+
+function destroySession(req, res) {
+  const cookies = parseCookies(req);
+  const token = cookies.deli_session;
+
+  if (token && ACTIVE_SESSIONS[token]) {
+    delete ACTIVE_SESSIONS[token];
+  }
+
+  res.setHeader(
+    "Set-Cookie",
+    "deli_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0"
+  );
+}
+
+/* ======================================================
    RUTAS DE PRUEBA
 ====================================================== */
 app.get("/", (req, res) => {
@@ -477,6 +537,8 @@ app.post("/login", (req, res) => {
       });
     }
 
+    createSession(res, restaurant);
+
     return res.json({
       ok: true,
       message: "Login correcto",
@@ -496,6 +558,8 @@ app.post("/login", (req, res) => {
       message: "Correo o contraseña incorrectos"
     });
   }
+
+  createSession(res, user);
 
   res.json({
     ok: true,
@@ -684,6 +748,8 @@ app.post("/admin/login", (req, res) => {
       message: "Credenciales inválidas"
     });
   }
+
+  createSession(res, admin);
 
   res.json({
     ok: true,
@@ -960,12 +1026,49 @@ app.delete("/admin/restaurants/:id", (req, res) => {
 });
 
 
+/* ======================================================
+   SESIÓN ACTUAL
+====================================================== */
+app.get("/session", (req, res) => {
+  const sessionUser = getSessionUser(req);
+
+  if (!sessionUser) {
+    return res.status(401).json({
+      ok: false,
+      message: "Sesión no activa"
+    });
+  }
+
+  if (sessionUser.role === "admin") {
+    return res.json({
+      ok: true,
+      admin: sessionUser
+    });
+  }
+
+  return res.json({
+    ok: true,
+    user: sessionUser
+  });
+});
+
+app.post("/logout", (req, res) => {
+  destroySession(req, res);
+
+  res.json({
+    ok: true,
+    message: "Sesión cerrada correctamente"
+  });
+});
+
+
 app.listen(PORT, () => {
   console.log("=================================");
   console.log("🚀 DELI BACKEND ACTIVO");
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
