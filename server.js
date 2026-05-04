@@ -107,7 +107,14 @@ function createSession(res, user) {
 
 function getSessionUser(req) {
   const cookies = parseCookies(req);
-  const token = cookies.deli_session;
+  const cookieToken = cookies.deli_session;
+
+  const authHeader = req.headers.authorization || "";
+  const bearerToken = authHeader.startsWith("Bearer ")
+    ? authHeader.replace("Bearer ", "").trim()
+    : "";
+
+  const token = cookieToken || bearerToken;
 
   if (!token) return null;
 
@@ -749,12 +756,13 @@ app.post("/admin/login", (req, res) => {
     });
   }
 
-  createSession(res, admin);
+  const sessionToken = createSession(res, admin);
 
   res.json({
     ok: true,
     message: "Login admin correcto",
-    admin
+    admin,
+    sessionToken
   });
 });
 
@@ -1068,6 +1076,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
