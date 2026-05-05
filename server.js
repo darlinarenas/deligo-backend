@@ -1389,12 +1389,232 @@ app.delete("/admin/restaurants/:id", (req, res) => {
 });
 
 
+/* ======================================================
+   ESTADÍSTICAS PÚBLICAS DEL INDEX
+   Calculadas en backend usando orders.json, restaurants.json y dishes.json.
+   El frontend solo consume estos endpoints y renderiza resultados.
+====================================================== */
+function getOrderDate(order) {
+  const candidates = [order?.createdAt, order?.updatedAt, order?.date];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+
+    const parsed = new Date(candidate);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function isOrderWithinLast7Days(order) {
+  const orderDate = getOrderDate(order);
+  if (!orderDate) return false;
+
+  const now = new Date();
+  const diff = now.getTime() - orderDate.getTime();
+  const sevenDays = 7 * 24 * 60 * 60 * 1000;
+
+  return diff >= 0 && diff <= sevenDays;
+}
+
+function isCountableOrder(order) {
+  const status = String(order?.status || "").trim().toLowerCase();
+  const excludedStatuses = [
+    "cancelado",
+    "cancelada",
+    "cancelled",
+    "rechazado",
+    "rechazada",
+    "rejected",
+    "anulado",
+    "anulada"
+  ];
+
+  return !excludedStatuses.includes(status);
+}
+
+function getOrdersForStats(orders) {
+  const validOrders = Array.isArray(orders) ? orders.filter(isCountableOrder) : [];
+  const weeklyOrders = validOrders.filter(isOrderWithinLast7Days);
+
+  if (weeklyOrders.length) {
+    return {
+      orders: weeklyOrders,
+      label: "esta semana",
+      period: "weekly"
+    };
+  }
+
+  return {
+    orders: validOrders,
+    label: "registrado",
+    period: "all_time"
+  };
+}
+
+function isPublicApprovedRestaurant(restaurant) {
+  const status = String(restaurant?.status || "approved").trim().toLowerCase();
+  return status === "approved";
+}
+
+function getRestaurantPublicStatus(restaurant) {
+  const openValue = restaurant?.open;
+  const isOpenValue = restaurant?.isOpen;
+  const storeStatus = String(restaurant?.storeStatus || restaurant?.availability || "").trim().toLowerCase();
+
+  if (openValue === false || isOpenValue === false) return false;
+  if (["closed", "cerrado", "inactive", "inactivo", "disabled", "bloqueado", "blocked"].includes(storeStatus)) {
+    return false;
+  }
+
+  return true;
+}
+
+function formatRestaurantForStats(restaurant, totalOrders) {
+  const category = restaurant?.category || restaurant?.type || "Comida";
+
+  return {
+    id: restaurant?.id || "",
+    name: restaurant?.name || "Restaurante",
+    email: normalizeEmail(restaurant?.email),
+    type: restaurant?.type || category,
+    category,
+    rating: restaurant?.rating || "Nuevo",
+    delivery: restaurant?.delivery || "A convenir",
+    time: restaurant?.time || "20-40 min",
+    address: restaurant?.address || "Punto Fijo",
+    phone: restaurant?.phone || "",
+    open: getRestaurantPublicStatus(restaurant),
+    totalOrders
+  };
+}
+
+function getDishIdentity(item) {
+  const id = String(item?.id || item?.dishId || "").trim();
+  const name = String(item?.name || item?.dishName || "Plato").trim();
+  return { id, name };
+}
+
+function findDishReference(dishes, restaurantEmail, item) {
+  const { id, name } = getDishIdentity(item);
+  const normalizedRestaurantEmail = normalizeEmail(restaurantEmail);
+  const normalizedName = String(name || "").trim().toLowerCase();
+
+  return dishes.find((dish) => {
+    const sameRestaurant = normalizeEmail(dish.restaurantEmail) === normalizedRestaurantEmail;
+    const sameId = id && String(dish.id || "").trim() === id;
+    const sameName = normalizedName && String(dish.name || "").trim().toLowerCase() === normalizedName;
+    return sameRestaurant && (sameId || sameName);
+  }) || null;
+}
+
+app.get("/stats/top-restaurants", (req, res) => {
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+  const orders = readJsonArrayFile(ORDERS_FILE);
+  const rankingData = getOrdersForStats(orders);
+  const countsByRestaurant = {};
+
+  rankingData.orders.forEach((order) => {
+    const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
+    if (!restaurantEmail) return;
+    countsByRestaurant[restaurantEmail] = (countsByRestaurant[restaurantEmail] || 0) + 1;
+  });
+
+  const topRestaurants = restaurants
+    .filter(isPublicApprovedRestaurant)
+    .map((restaurant) => {
+      const restaurantEmail = normalizeEmail(restaurant.email);
+      const totalOrders = countsByRestaurant[restaurantEmail] || 0;
+      return formatRestaurantForStats(restaurant, totalOrders);
+    })
+    .filter((restaurant) => restaurant.totalOrders > 0)
+    .sort((a, b) => b.totalOrders - a.totalOrders)
+    .slice(0, 6);
+
+  res.json({
+    ok: true,
+    label: rankingData.label,
+    period: rankingData.period,
+    total: topRestaurants.length,
+    restaurants: topRestaurants
+  });
+});
+
+app.get("/stats/top-dishes", (req, res) => {
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+  const dishes = readJsonArrayFile(DISHES_FILE);
+  const orders = readJsonArrayFile(ORDERS_FILE);
+  const rankingData = getOrdersForStats(orders);
+  const approvedRestaurantByEmail = {};
+  const countsByDish = {};
+
+  restaurants
+    .filter(isPublicApprovedRestaurant)
+    .forEach((restaurant) => {
+      approvedRestaurantByEmail[normalizeEmail(restaurant.email)] = restaurant;
+    });
+
+  rankingData.orders.forEach((order) => {
+    const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
+    const restaurant = approvedRestaurantByEmail[restaurantEmail];
+
+    if (!restaurant) return;
+
+    const items = Array.isArray(order.items) ? order.items : [];
+
+    items.forEach((item) => {
+      const qty = Number(item.qty || item.quantity || 1);
+      if (!Number.isFinite(qty) || qty <= 0) return;
+
+      const dishRef = findDishReference(dishes, restaurantEmail, item);
+      const identity = getDishIdentity(item);
+      const dishId = String(dishRef?.id || identity.id || identity.name).trim();
+      const dishName = String(dishRef?.name || identity.name || "Plato").trim();
+      const key = `${restaurantEmail}__${dishId || dishName.toLowerCase()}`;
+      const price = Number(dishRef?.price ?? item.price ?? item.unitPrice ?? 0);
+
+      if (!countsByDish[key]) {
+        countsByDish[key] = {
+          dishId,
+          dishName,
+          dishPrice: Number.isFinite(price) ? price : 0,
+          dishCategory: dishRef?.category || item.category || restaurant.category || "Comida",
+          dishEmoji: dishRef?.emoji || item.emoji || "🍽️",
+          restaurantId: restaurant.id || "",
+          restaurantEmail,
+          restaurantName: restaurant.name || order.restaurantName || "Restaurante",
+          totalQty: 0
+        };
+      }
+
+      countsByDish[key].totalQty += qty;
+    });
+  });
+
+  const topDishes = Object.values(countsByDish)
+    .sort((a, b) => b.totalQty - a.totalQty)
+    .slice(0, 6);
+
+  res.json({
+    ok: true,
+    label: rankingData.label,
+    period: rankingData.period,
+    total: topDishes.length,
+    dishes: topDishes
+  });
+});
+
+
 app.listen(PORT, () => {
   console.log("=================================");
   console.log("🚀 DELI BACKEND ACTIVO");
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
