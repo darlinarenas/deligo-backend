@@ -4,9 +4,36 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { Pool } = require("pg");
+require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+/* ======================================================
+   POSTGRESQL / SUPABASE
+   - Conexión inicial segura.
+   - Por ahora NO reemplaza JSON.
+   - Solo permite probar conexión con /db-test.
+   - DATABASE_URL debe estar configurada en Render.
+====================================================== */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+pool.connect()
+  .then((client) => {
+    console.log("=================================");
+    console.log("✅ PostgreSQL conectado correctamente");
+    console.log("=================================");
+    client.release();
+  })
+  .catch((error) => {
+    console.error("❌ Error conectando PostgreSQL:", error.message);
+  });
 
 const ORDERS_FILE = path.join(__dirname, "orders.json");
 const USERS_FILE = path.join(__dirname, "users.json");
@@ -1608,12 +1635,41 @@ app.get("/stats/top-dishes", (req, res) => {
 });
 
 
+
+/* ======================================================
+   TEST POSTGRESQL / SUPABASE
+   - Ruta de prueba para confirmar que Render conecta con Supabase.
+   - No modifica datos.
+   - No reemplaza todavía JSON.
+====================================================== */
+app.get("/db-test", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT NOW() AS server_time");
+
+    res.json({
+      ok: true,
+      message: "PostgreSQL conectado correctamente",
+      database: "Supabase PostgreSQL",
+      time: result.rows[0]
+    });
+  } catch (error) {
+    console.error("Error DB TEST:", error);
+
+    res.status(500).json({
+      ok: false,
+      message: "Error conectando PostgreSQL",
+      error: error.message
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log("=================================");
   console.log("🚀 DELI BACKEND ACTIVO");
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
