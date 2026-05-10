@@ -183,7 +183,426 @@ async function initDatabaseTables() {
   }
 }
 
-initDatabaseTables();
+
+/* ======================================================
+   POSTGRESQL - MIGRACIÓN SEGURA JSON -> POSTGRESQL
+   IMPORTANTE:
+   - Esta migración NO borra los archivos JSON.
+   - Evita duplicados usando los mismos ID actuales.
+   - Mantiene compatibilidad con el frontend actual.
+   - Por ahora los endpoints siguen respondiendo desde JSON.
+   - Esta fase solo copia los datos actuales a PostgreSQL.
+====================================================== */
+function toNullableText(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+function toNumberValue(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function toBooleanValue(value, fallback = true) {
+  if (value === true || value === false) return value;
+  if (String(value).toLowerCase() === "true") return true;
+  if (String(value).toLowerCase() === "false") return false;
+  return fallback;
+}
+
+function toDateValue(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function buildAdminId(admin) {
+  const email = normalizeEmail(admin?.email);
+  return admin?.id || (email ? `admin_${email.replace(/[^a-z0-9]/gi, "_")}` : generateId("admin"));
+}
+
+async function migrateUsersToPostgres(client) {
+  const users = readJsonArrayFile(USERS_FILE);
+
+  for (const user of users) {
+    const id = String(user.id || generateId("user")).trim();
+    const email = normalizeEmail(user.email);
+    if (!id || !email) continue;
+
+    await client.query(
+      `
+      INSERT INTO users (
+        id, full_name, name, email, password, phone, address, reference,
+        role, status, latitude, longitude, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamptz, NOW()),COALESCE($14::timestamptz, NOW()))
+      ON CONFLICT (id) DO UPDATE SET
+        full_name = EXCLUDED.full_name,
+        name = EXCLUDED.name,
+        email = EXCLUDED.email,
+        password = EXCLUDED.password,
+        phone = EXCLUDED.phone,
+        address = EXCLUDED.address,
+        reference = EXCLUDED.reference,
+        role = EXCLUDED.role,
+        status = EXCLUDED.status,
+        latitude = EXCLUDED.latitude,
+        longitude = EXCLUDED.longitude,
+        updated_at = COALESCE(EXCLUDED.updated_at, NOW())
+      `,
+      [
+        id,
+        toNullableText(user.fullName || user.name),
+        toNullableText(user.name || user.fullName),
+        email,
+        String(user.password || ""),
+        toNullableText(user.phone),
+        toNullableText(user.address),
+        toNullableText(user.reference),
+        toNullableText(user.role || "customer"),
+        toNullableText(user.status || "active"),
+        toNullableText(user.location?.lat || user.latitude),
+        toNullableText(user.location?.lng || user.longitude),
+        toDateValue(user.createdAt),
+        toDateValue(user.updatedAt)
+      ]
+    );
+  }
+
+  return users.length;
+}
+
+async function migrateRestaurantsToPostgres(client) {
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
+  for (const restaurant of restaurants) {
+    const id = String(restaurant.id || generateId("restaurant")).trim();
+    const email = normalizeEmail(restaurant.email);
+    if (!id || !email) continue;
+
+    const commission = toNumberValue(
+      restaurant.commissionPercent ?? restaurant.commission,
+      15
+    );
+
+    await client.query(
+      `
+      INSERT INTO restaurants (
+        id, name, email, password, phone, address, category, description,
+        role, status, commission, commission_percent, rating, delivery, time,
+        open, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,COALESCE($17::timestamptz, NOW()),COALESCE($18::timestamptz, NOW()))
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        email = EXCLUDED.email,
+        password = EXCLUDED.password,
+        phone = EXCLUDED.phone,
+        address = EXCLUDED.address,
+        category = EXCLUDED.category,
+        description = EXCLUDED.description,
+        role = EXCLUDED.role,
+        status = EXCLUDED.status,
+        commission = EXCLUDED.commission,
+        commission_percent = EXCLUDED.commission_percent,
+        rating = EXCLUDED.rating,
+        delivery = EXCLUDED.delivery,
+        time = EXCLUDED.time,
+        open = EXCLUDED.open,
+        updated_at = COALESCE(EXCLUDED.updated_at, NOW())
+      `,
+      [
+        id,
+        toNullableText(restaurant.name) || "Restaurante",
+        email,
+        String(restaurant.password || ""),
+        toNullableText(restaurant.phone),
+        toNullableText(restaurant.address),
+        toNullableText(restaurant.category || restaurant.type),
+        toNullableText(restaurant.description),
+        toNullableText(restaurant.role || "restaurant"),
+        toNullableText(restaurant.status || "pending"),
+        commission,
+        commission,
+        toNullableText(restaurant.rating),
+        toNullableText(restaurant.delivery),
+        toNullableText(restaurant.time),
+        toBooleanValue(restaurant.open ?? restaurant.isOpen, true),
+        toDateValue(restaurant.createdAt),
+        toDateValue(restaurant.updatedAt)
+      ]
+    );
+  }
+
+  return restaurants.length;
+}
+
+async function migrateDishesToPostgres(client) {
+  const dishes = readJsonArrayFile(DISHES_FILE);
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
+  for (const dish of dishes) {
+    const id = String(dish.id || generateId("dish")).trim();
+    const restaurantEmail = normalizeEmail(dish.restaurantEmail);
+    if (!id || !restaurantEmail || !dish.name) continue;
+
+    const restaurant = restaurants.find((item) => normalizeEmail(item.email) === restaurantEmail);
+
+    await client.query(
+      `
+      INSERT INTO dishes (
+        id, restaurant_id, restaurant_email, restaurant_name, restaurant_address,
+        name, description, price, category, prep_time, emoji, image, available,
+        created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamptz, NOW()),COALESCE($15::timestamptz, NOW()))
+      ON CONFLICT (id) DO UPDATE SET
+        restaurant_id = EXCLUDED.restaurant_id,
+        restaurant_email = EXCLUDED.restaurant_email,
+        restaurant_name = EXCLUDED.restaurant_name,
+        restaurant_address = EXCLUDED.restaurant_address,
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        price = EXCLUDED.price,
+        category = EXCLUDED.category,
+        prep_time = EXCLUDED.prep_time,
+        emoji = EXCLUDED.emoji,
+        image = EXCLUDED.image,
+        available = EXCLUDED.available,
+        updated_at = COALESCE(EXCLUDED.updated_at, NOW())
+      `,
+      [
+        id,
+        toNullableText(restaurant?.id),
+        restaurantEmail,
+        toNullableText(dish.restaurantName || restaurant?.name),
+        toNullableText(dish.restaurantAddress || restaurant?.address),
+        toNullableText(dish.name) || "Plato",
+        toNullableText(dish.description),
+        toNumberValue(dish.price, 0),
+        toNullableText(dish.category),
+        toNullableText(dish.prepTime),
+        toNullableText(dish.emoji),
+        toNullableText(dish.image),
+        toBooleanValue(dish.available, true),
+        toDateValue(dish.createdAt),
+        toDateValue(dish.updatedAt)
+      ]
+    );
+  }
+
+  return dishes.length;
+}
+
+async function migrateAdminsToPostgres(client) {
+  const admins = readJsonArrayFile(ADMINS_FILE);
+
+  for (const admin of admins) {
+    const email = normalizeEmail(admin.email);
+    if (!email) continue;
+
+    const id = buildAdminId(admin);
+
+    await client.query(
+      `
+      INSERT INTO admins (
+        id, name, email, password, role, status, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()),COALESCE($8::timestamptz, NOW()))
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        email = EXCLUDED.email,
+        password = EXCLUDED.password,
+        role = EXCLUDED.role,
+        status = EXCLUDED.status,
+        updated_at = COALESCE(EXCLUDED.updated_at, NOW())
+      `,
+      [
+        id,
+        toNullableText(admin.name || "Administrador"),
+        email,
+        String(admin.password || ""),
+        toNullableText(admin.role || "admin"),
+        toNullableText(admin.status || "active"),
+        toDateValue(admin.createdAt),
+        toDateValue(admin.updatedAt)
+      ]
+    );
+  }
+
+  return admins.length;
+}
+
+async function migrateOrdersToPostgres(client) {
+  const orders = readJsonArrayFile(ORDERS_FILE);
+  const users = readJsonArrayFile(USERS_FILE);
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
+  for (const order of orders) {
+    const id = String(order.id || generateId("order")).trim();
+    const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email);
+    if (!id || !restaurantEmail) continue;
+
+    const customerEmail = normalizeEmail(order.customer?.email || order.userEmail);
+    const user = users.find((item) => normalizeEmail(item.email) === customerEmail);
+    const restaurant = restaurants.find((item) => normalizeEmail(item.email) === restaurantEmail);
+
+    await client.query(
+      `
+      INSERT INTO orders (
+        id, user_id, customer_email, customer_name, customer_phone, customer_address,
+        restaurant_id, restaurant_email, restaurant_name, status, total,
+        payment_method, payment_status, notes, delivery_address, delivery_reference,
+        latitude, longitude, date_text, time_text, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,COALESCE($21::timestamptz, NOW()),COALESCE($22::timestamptz, NOW()))
+      ON CONFLICT (id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        customer_email = EXCLUDED.customer_email,
+        customer_name = EXCLUDED.customer_name,
+        customer_phone = EXCLUDED.customer_phone,
+        customer_address = EXCLUDED.customer_address,
+        restaurant_id = EXCLUDED.restaurant_id,
+        restaurant_email = EXCLUDED.restaurant_email,
+        restaurant_name = EXCLUDED.restaurant_name,
+        status = EXCLUDED.status,
+        total = EXCLUDED.total,
+        payment_method = EXCLUDED.payment_method,
+        payment_status = EXCLUDED.payment_status,
+        notes = EXCLUDED.notes,
+        delivery_address = EXCLUDED.delivery_address,
+        delivery_reference = EXCLUDED.delivery_reference,
+        latitude = EXCLUDED.latitude,
+        longitude = EXCLUDED.longitude,
+        date_text = EXCLUDED.date_text,
+        time_text = EXCLUDED.time_text,
+        updated_at = COALESCE(EXCLUDED.updated_at, NOW())
+      `,
+      [
+        id,
+        toNullableText(user?.id || order.userId),
+        customerEmail || null,
+        toNullableText(order.customer?.fullName || order.customer?.name),
+        toNullableText(order.customer?.phone),
+        toNullableText(order.customer?.address),
+        toNullableText(restaurant?.id || order.restaurant?.id),
+        restaurantEmail,
+        toNullableText(order.restaurantName || restaurant?.name),
+        toNullableText(order.status || "pendiente"),
+        toNumberValue(order.total, 0),
+        toNullableText(order.paymentMethod),
+        toNullableText(order.paymentStatus || "pendiente"),
+        toNullableText(order.notes),
+        toNullableText(order.deliveryAddress || order.customer?.address),
+        toNullableText(order.deliveryReference || order.customer?.reference),
+        toNullableText(order.latitude || order.location?.lat || order.customer?.location?.lat),
+        toNullableText(order.longitude || order.location?.lng || order.customer?.location?.lng),
+        toNullableText(order.date),
+        toNullableText(order.time),
+        toDateValue(order.createdAt),
+        toDateValue(order.updatedAt)
+      ]
+    );
+
+    const items = Array.isArray(order.items) ? order.items : [];
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index] || {};
+      const itemId = String(item.id || item.dishId || "").trim();
+      const quantity = toNumberValue(item.qty ?? item.quantity, 1);
+      const price = toNumberValue(item.price ?? item.unitPrice, 0);
+      const subtotal = toNumberValue(item.subtotal, quantity * price);
+      const orderItemId = `${id}_item_${index}_${itemId || "sin_id"}`;
+
+      await client.query(
+        `
+        INSERT INTO order_items (
+          id, order_id, dish_id, name_snapshot, price_snapshot,
+          quantity, subtotal, created_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, NOW()))
+        ON CONFLICT (id) DO UPDATE SET
+          order_id = EXCLUDED.order_id,
+          dish_id = EXCLUDED.dish_id,
+          name_snapshot = EXCLUDED.name_snapshot,
+          price_snapshot = EXCLUDED.price_snapshot,
+          quantity = EXCLUDED.quantity,
+          subtotal = EXCLUDED.subtotal
+        `,
+        [
+          orderItemId,
+          id,
+          toNullableText(itemId),
+          toNullableText(item.name || item.dishName) || "Producto",
+          price,
+          quantity,
+          subtotal,
+          toDateValue(order.createdAt)
+        ]
+      );
+    }
+  }
+
+  return orders.length;
+}
+
+async function migrateJsonToPostgres() {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const result = {
+      users: await migrateUsersToPostgres(client),
+      restaurants: await migrateRestaurantsToPostgres(client),
+      dishes: await migrateDishesToPostgres(client),
+      admins: await migrateAdminsToPostgres(client),
+      orders: await migrateOrdersToPostgres(client)
+    };
+
+    await client.query("COMMIT");
+
+    console.log("✅ Migración JSON -> PostgreSQL completada", result);
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("❌ Error migrando JSON -> PostgreSQL:", error.message);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function getDatabaseCounts() {
+  const [users, restaurants, dishes, orders, orderItems, admins] = await Promise.all([
+    pool.query("SELECT COUNT(*)::int AS total FROM users"),
+    pool.query("SELECT COUNT(*)::int AS total FROM restaurants"),
+    pool.query("SELECT COUNT(*)::int AS total FROM dishes"),
+    pool.query("SELECT COUNT(*)::int AS total FROM orders"),
+    pool.query("SELECT COUNT(*)::int AS total FROM order_items"),
+    pool.query("SELECT COUNT(*)::int AS total FROM admins")
+  ]);
+
+  return {
+    users: users.rows[0].total,
+    restaurants: restaurants.rows[0].total,
+    dishes: dishes.rows[0].total,
+    orders: orders.rows[0].total,
+    order_items: orderItems.rows[0].total,
+    admins: admins.rows[0].total
+  };
+}
+
+async function bootstrapDatabase() {
+  try {
+    await initDatabaseTables();
+    await migrateJsonToPostgres();
+  } catch (error) {
+    console.error("❌ Bootstrap PostgreSQL falló sin detener el servidor:", error.message);
+  }
+}
+
+bootstrapDatabase();
 
 
 /* ======================================================
@@ -1807,12 +2226,65 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
+/* ======================================================
+   TEST MIGRACIÓN JSON -> POSTGRESQL
+   - Ejecuta la migración manualmente si se necesita repetir.
+   - No borra JSON.
+   - Evita duplicados por ID.
+====================================================== */
+app.get("/db-migrate", async (req, res) => {
+  try {
+    const migrated = await migrateJsonToPostgres();
+    const counts = await getDatabaseCounts();
+
+    res.json({
+      ok: true,
+      message: "Migración JSON -> PostgreSQL ejecutada correctamente",
+      migrated,
+      counts
+    });
+  } catch (error) {
+    console.error("Error DB MIGRATE:", error);
+
+    res.status(500).json({
+      ok: false,
+      message: "Error migrando JSON -> PostgreSQL",
+      error: error.message
+    });
+  }
+});
+
+/* ======================================================
+   ESTADO POSTGRESQL
+   - Sirve para verificar cuántos registros hay migrados.
+====================================================== */
+app.get("/db-status", async (req, res) => {
+  try {
+    const counts = await getDatabaseCounts();
+
+    res.json({
+      ok: true,
+      message: "Estado PostgreSQL DELI GO",
+      counts
+    });
+  } catch (error) {
+    console.error("Error DB STATUS:", error);
+
+    res.status(500).json({
+      ok: false,
+      message: "Error leyendo estado PostgreSQL",
+      error: error.message
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log("=================================");
   console.log("🚀 DELI BACKEND ACTIVO");
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
