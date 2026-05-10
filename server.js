@@ -833,132 +833,6 @@ async function getDishesByRestaurantEmailFromPostgres(email) {
   return result.rows.map(mapDbDish);
 }
 
-
-/* ======================================================
-   POSTGRESQL - ESCRITURAS CON RESPALDO JSON
-   FASE 4:
-   - Registro de clientes y restaurantes escribe primero en PostgreSQL.
-   - JSON queda como respaldo temporal para no romper compatibilidad.
-   - Si PostgreSQL falla, se usa JSON como fallback para mantener el sistema operativo.
-====================================================== */
-async function emailExistsInPostgres(email) {
-  const normalizedEmail = normalizeEmail(email);
-
-  const result = await pool.query(
-    `
-    SELECT EXISTS (
-      SELECT 1 FROM users WHERE LOWER(email) = LOWER($1)
-      UNION
-      SELECT 1 FROM restaurants WHERE LOWER(email) = LOWER($1)
-    ) AS exists
-    `,
-    [normalizedEmail]
-  );
-
-  return Boolean(result.rows[0]?.exists);
-}
-
-async function createUserInPostgres(user) {
-  const result = await pool.query(
-    `
-    INSERT INTO users (
-      id, full_name, name, email, password, phone, address, reference,
-      role, status, latitude, longitude, created_at, updated_at
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,NOW())
-    RETURNING *
-    `,
-    [
-      user.id,
-      toNullableText(user.fullName || user.name),
-      toNullableText(user.name || user.fullName),
-      normalizeEmail(user.email),
-      String(user.password || ""),
-      toNullableText(user.phone),
-      toNullableText(user.address),
-      toNullableText(user.reference),
-      toNullableText(user.role || "customer"),
-      toNullableText(user.status || "active"),
-      toNullableText(user.location?.lat || user.latitude),
-      toNullableText(user.location?.lng || user.longitude),
-      toDateValue(user.createdAt) || new Date().toISOString()
-    ]
-  );
-
-  return mapDbUser(result.rows[0]);
-}
-
-async function createRestaurantInPostgres(restaurant) {
-  const commission = toNumberValue(
-    restaurant.commissionPercent ?? restaurant.commission,
-    15
-  );
-
-  const result = await pool.query(
-    `
-    INSERT INTO restaurants (
-      id, name, email, password, phone, address, category, description,
-      role, status, commission, commission_percent, rating, delivery, time,
-      open, created_at, updated_at
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,NOW())
-    RETURNING *
-    `,
-    [
-      restaurant.id,
-      toNullableText(restaurant.name) || "Restaurante",
-      normalizeEmail(restaurant.email),
-      String(restaurant.password || ""),
-      toNullableText(restaurant.phone),
-      toNullableText(restaurant.address),
-      toNullableText(restaurant.category || restaurant.type),
-      toNullableText(restaurant.description),
-      toNullableText(restaurant.role || "restaurant"),
-      toNullableText(restaurant.status || "pending"),
-      commission,
-      commission,
-      toNullableText(restaurant.rating),
-      toNullableText(restaurant.delivery),
-      toNullableText(restaurant.time),
-      toBooleanValue(restaurant.open ?? restaurant.isOpen, true),
-      toDateValue(restaurant.createdAt) || new Date().toISOString()
-    ]
-  );
-
-  return mapDbRestaurant(result.rows[0]);
-}
-
-function backupUserToJson(user) {
-  const users = readJsonArrayFile(USERS_FILE);
-  const exists = users.some((item) => normalizeEmail(item.email) === normalizeEmail(user.email));
-
-  if (!exists) {
-    users.push(user);
-    writeJsonArrayFile(USERS_FILE, users);
-  }
-}
-
-function backupRestaurantToJson(restaurant) {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-  const exists = restaurants.some((item) => normalizeEmail(item.email) === normalizeEmail(restaurant.email));
-
-  if (!exists) {
-    restaurants.push(restaurant);
-    writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
-  }
-}
-
-function emailExistsInJson(email) {
-  const normalizedEmail = normalizeEmail(email);
-  const users = readJsonArrayFile(USERS_FILE);
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-
-  const existsInUsers = users.some((item) => normalizeEmail(item.email) === normalizedEmail);
-  const existsInRestaurants = restaurants.some((item) => normalizeEmail(item.email) === normalizedEmail);
-
-  return existsInUsers || existsInRestaurants;
-}
-
 function parseCookies(req) {
   const header = req.headers.cookie || "";
 
@@ -1395,7 +1269,10 @@ app.delete("/restaurants/:email/dishes/:dishId", (req, res) => {
 /* ======================================================
    REGISTRO CLIENTE
 ====================================================== */
-app.post("/register", async (req, res) => {
+app.post("/register", (req, res) => {
+  const users = readJsonArrayFile(USERS_FILE);
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
   const {
     fullName,
     address,
@@ -1415,16 +1292,29 @@ app.post("/register", async (req, res) => {
 
   const normalizedEmail = normalizeEmail(email);
 
+  const existsInUsers = users.some(
+    (item) => normalizeEmail(item.email) === normalizedEmail
+  );
+
+  const existsInRestaurants = restaurants.some(
+    (item) => normalizeEmail(item.email) === normalizedEmail
+  );
+
+  if (existsInUsers || existsInRestaurants) {
+    return res.status(409).json({
+      ok: false,
+      message: "Ese correo ya está registrado"
+    });
+  }
+
   const newUser = {
     id: generateId("user"),
     fullName: normalizeText(fullName),
-    name: normalizeText(fullName),
     address: normalizeText(address),
     phone: normalizeText(phone),
     email: normalizedEmail,
     password: String(password),
     role: "customer",
-    status: "active",
     reference: normalizeText(reference),
     location: {
       lat: location?.lat || "",
@@ -1433,52 +1323,23 @@ app.post("/register", async (req, res) => {
     createdAt: new Date().toISOString()
   };
 
-  try {
-    const existsInPostgres = await emailExistsInPostgres(normalizedEmail);
+  users.push(newUser);
+  writeJsonArrayFile(USERS_FILE, users);
 
-    if (existsInPostgres) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const savedUser = await createUserInPostgres(newUser);
-
-    // Respaldo temporal en JSON para mantener compatibilidad mientras termina la migración.
-    backupUserToJson(newUser);
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Usuario registrado correctamente",
-      user: savedUser
-    });
-  } catch (error) {
-    console.error("Error registrando usuario en PostgreSQL, usando JSON como respaldo:", error.message);
-
-    if (emailExistsInJson(normalizedEmail)) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    backupUserToJson(newUser);
-
-    return res.status(201).json({
-      ok: true,
-      source: "json_fallback",
-      message: "Usuario registrado correctamente con respaldo JSON",
-      user: newUser
-    });
-  }
+  res.status(201).json({
+    ok: true,
+    message: "Usuario registrado correctamente",
+    user: newUser
+  });
 });
 
 /* ======================================================
    REGISTRO RESTAURANTE
 ====================================================== */
-app.post("/register-restaurant", async (req, res) => {
+app.post("/register-restaurant", (req, res) => {
+  const users = readJsonArrayFile(USERS_FILE);
+  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
   const { name, address, phone, email, password } = req.body;
 
   if (!name || !address || !phone || !email || !password) {
@@ -1490,6 +1351,21 @@ app.post("/register-restaurant", async (req, res) => {
 
   const normalizedEmail = normalizeEmail(email);
 
+  const existsInUsers = users.some(
+    (item) => normalizeEmail(item.email) === normalizedEmail
+  );
+
+  const existsInRestaurants = restaurants.some(
+    (item) => normalizeEmail(item.email) === normalizedEmail
+  );
+
+  if (existsInUsers || existsInRestaurants) {
+    return res.status(409).json({
+      ok: false,
+      message: "Ese correo ya está registrado"
+    });
+  }
+
   const newRestaurant = {
     id: generateId("restaurant"),
     name: normalizeText(name),
@@ -1500,60 +1376,23 @@ app.post("/register-restaurant", async (req, res) => {
     role: "restaurant",
     status: "pending",
     commission: 15,
-    commissionPercent: 15,
-    open: true,
     createdAt: new Date().toISOString()
   };
 
-  try {
-    const existsInPostgres = await emailExistsInPostgres(normalizedEmail);
+  restaurants.push(newRestaurant);
+  writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
 
-    if (existsInPostgres) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const savedRestaurant = await createRestaurantInPostgres(newRestaurant);
-
-    // Respaldo temporal en JSON para mantener compatibilidad mientras termina la migración.
-    backupRestaurantToJson(newRestaurant);
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Restaurante registrado correctamente",
-      restaurant: savedRestaurant
-    });
-  } catch (error) {
-    console.error("Error registrando restaurante en PostgreSQL, usando JSON como respaldo:", error.message);
-
-    if (emailExistsInJson(normalizedEmail)) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    backupRestaurantToJson(newRestaurant);
-
-    return res.status(201).json({
-      ok: true,
-      source: "json_fallback",
-      message: "Restaurante registrado correctamente con respaldo JSON",
-      restaurant: newRestaurant
-    });
-  }
+  res.status(201).json({
+    ok: true,
+    message: "Restaurante registrado correctamente",
+    restaurant: newRestaurant
+  });
 });
 
 /* ======================================================
    LOGIN
 ====================================================== */
-app.post("/login", (req, res) => {
-  const users = readJsonArrayFile(USERS_FILE);
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-
+app.post("/login", async (req, res) => {
   const { role, email, password } = req.body;
 
   if (!role || !email || !password) {
@@ -1567,13 +1406,22 @@ app.post("/login", (req, res) => {
   const normalizedRole = String(role || "").trim().toLowerCase();
 
   if (normalizedRole === "restaurant" || normalizedRole === "restaurante") {
-    const restaurant = restaurants.find(
-      (item) =>
-        normalizeEmail(item.email) === normalizedEmail &&
-        String(item.password) === String(password)
-    );
+    let restaurant = null;
+
+    try {
+      restaurant = await getRestaurantByEmailFromPostgres(normalizedEmail);
+    } catch (error) {
+      console.error("Error leyendo restaurante para login desde PostgreSQL, usando JSON:", error.message);
+    }
 
     if (!restaurant) {
+      const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+      restaurant = restaurants.find(
+        (item) => normalizeEmail(item.email) === normalizedEmail
+      );
+    }
+
+    if (!restaurant || String(restaurant.password) !== String(password)) {
       return res.status(401).json({
         ok: false,
         message: "Datos inválidos para restaurante"
@@ -1584,7 +1432,7 @@ app.post("/login", (req, res) => {
       VALIDACIÓN ADMINISTRATIVA:
       - Los restaurantes nuevos quedan con status: "pending".
       - Solo pueden entrar al panel si el administrador los aprueba.
-      - Los restaurantes antiguos sin status se permiten para no romper datos previos.
+      - Ahora se valida contra PostgreSQL primero y JSON queda como respaldo.
     */
     if (restaurant.status && restaurant.status !== "approved") {
       return res.status(403).json({
@@ -1601,18 +1449,26 @@ app.post("/login", (req, res) => {
 
     return res.json({
       ok: true,
+      source: "postgres_with_json_fallback",
       message: "Login correcto",
       user: sessionUser
     });
   }
 
-  const user = users.find(
-    (item) =>
-      normalizeEmail(item.email) === normalizedEmail &&
-      String(item.password) === String(password)
-  );
+  let user = null;
+
+  try {
+    user = await getUserByEmailFromPostgres(normalizedEmail);
+  } catch (error) {
+    console.error("Error leyendo usuario para login desde PostgreSQL, usando JSON:", error.message);
+  }
 
   if (!user) {
+    const users = readJsonArrayFile(USERS_FILE);
+    user = users.find((item) => normalizeEmail(item.email) === normalizedEmail);
+  }
+
+  if (!user || String(user.password) !== String(password)) {
     return res.status(401).json({
       ok: false,
       message: "Correo o contraseña incorrectos"
@@ -1624,6 +1480,7 @@ app.post("/login", (req, res) => {
 
   res.json({
     ok: true,
+    source: "postgres_with_json_fallback",
     message: "Login correcto",
     user: sessionUser
   });
@@ -1843,7 +1700,7 @@ app.get("/admin/datos", (req, res) => {
 /* ======================================================
    ADMIN RESTAURANTES - CAMBIAR ESTADO
 ====================================================== */
-app.patch("/admin/restaurantes/:id/estado", (req, res) => {
+app.patch("/admin/restaurantes/:id/estado", async (req, res) => {
   const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
   const restaurantId = String(req.params.id || "").trim();
   let status = String(req.body?.status || "").trim().toLowerCase();
@@ -1867,6 +1724,26 @@ app.patch("/admin/restaurantes/:id/estado", (req, res) => {
     });
   }
 
+  let postgresRestaurant = null;
+
+  try {
+    const result = await pool.query(
+      `
+      UPDATE restaurants
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2 OR LOWER(email) = LOWER($2)
+      RETURNING *
+      `,
+      [status, restaurantId]
+    );
+
+    if (result.rows[0]) {
+      postgresRestaurant = mapDbRestaurant(result.rows[0]);
+    }
+  } catch (error) {
+    console.error("Error actualizando estado en PostgreSQL, usando JSON como respaldo:", error.message);
+  }
+
   const index = restaurants.findIndex((restaurant) => {
     return (
       String(restaurant.id || "").trim() === restaurantId ||
@@ -1874,25 +1751,30 @@ app.patch("/admin/restaurantes/:id/estado", (req, res) => {
     );
   });
 
-  if (index === -1) {
+  if (index !== -1) {
+    restaurants[index] = {
+      ...restaurants[index],
+      status,
+      updatedAt: new Date().toISOString()
+    };
+
+    writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
+  }
+
+  const finalRestaurant = postgresRestaurant || restaurants[index] || null;
+
+  if (!finalRestaurant) {
     return res.status(404).json({
       ok: false,
       message: "Restaurante no encontrado"
     });
   }
 
-  restaurants[index] = {
-    ...restaurants[index],
-    status,
-    updatedAt: new Date().toISOString()
-  };
-
-  writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
-
   res.json({
     ok: true,
+    source: postgresRestaurant ? "postgres_and_json_backup" : "json_fallback",
     message: "Estado del restaurante actualizado correctamente",
-    restaurant: restaurants[index]
+    restaurant: finalRestaurant
   });
 });
 
@@ -2246,7 +2128,7 @@ app.patch("/admin/restaurantes/:id/comision", (req, res) => {
    ADMIN RESTAURANTES - RUTAS COMPATIBLES
    Mantienen funcionando nombres anteriores usados por el frontend.
 ====================================================== */
-app.patch("/admin/restaurants/:id/status", (req, res) => {
+app.patch("/admin/restaurants/:id/status", async (req, res) => {
   const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
   const restaurantId = String(req.params.id || "").trim();
   let status = String(req.body?.status || "").trim().toLowerCase();
@@ -2270,6 +2152,26 @@ app.patch("/admin/restaurants/:id/status", (req, res) => {
     });
   }
 
+  let postgresRestaurant = null;
+
+  try {
+    const result = await pool.query(
+      `
+      UPDATE restaurants
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2 OR LOWER(email) = LOWER($2)
+      RETURNING *
+      `,
+      [status, restaurantId]
+    );
+
+    if (result.rows[0]) {
+      postgresRestaurant = mapDbRestaurant(result.rows[0]);
+    }
+  } catch (error) {
+    console.error("Error actualizando estado en PostgreSQL, usando JSON como respaldo:", error.message);
+  }
+
   const index = restaurants.findIndex((restaurant) => {
     return (
       String(restaurant.id || "").trim() === restaurantId ||
@@ -2277,25 +2179,30 @@ app.patch("/admin/restaurants/:id/status", (req, res) => {
     );
   });
 
-  if (index === -1) {
+  if (index !== -1) {
+    restaurants[index] = {
+      ...restaurants[index],
+      status,
+      updatedAt: new Date().toISOString()
+    };
+
+    writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
+  }
+
+  const finalRestaurant = postgresRestaurant || restaurants[index] || null;
+
+  if (!finalRestaurant) {
     return res.status(404).json({
       ok: false,
       message: "Restaurante no encontrado"
     });
   }
 
-  restaurants[index] = {
-    ...restaurants[index],
-    status,
-    updatedAt: new Date().toISOString()
-  };
-
-  writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
-
   res.json({
     ok: true,
+    source: postgresRestaurant ? "postgres_and_json_backup" : "json_fallback",
     message: "Estado del restaurante actualizado correctamente",
-    restaurant: restaurants[index]
+    restaurant: finalRestaurant
   });
 });
 
@@ -2642,6 +2549,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
