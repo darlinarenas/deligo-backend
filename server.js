@@ -715,6 +715,124 @@ function generateId(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 }
 
+
+/* ======================================================
+   POSTGRESQL - LECTURAS CON RESPALDO JSON
+   FASE 3:
+   - Estas funciones leen primero desde PostgreSQL.
+   - Si PostgreSQL falla, los endpoints usan JSON como respaldo.
+   - Mantienen la misma forma de respuesta que ya usa el frontend.
+====================================================== */
+function mapDbUser(row) {
+  return {
+    id: row.id || "",
+    fullName: row.full_name || row.name || "",
+    name: row.name || row.full_name || "",
+    address: row.address || "",
+    phone: row.phone || "",
+    email: normalizeEmail(row.email),
+    password: row.password || "",
+    role: row.role || "customer",
+    status: row.status || "active",
+    reference: row.reference || "",
+    location: {
+      lat: row.latitude || "",
+      lng: row.longitude || ""
+    },
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : "",
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : ""
+  };
+}
+
+function mapDbRestaurant(row) {
+  return {
+    id: row.id || "",
+    name: row.name || "Restaurante",
+    address: row.address || "",
+    phone: row.phone || "",
+    email: normalizeEmail(row.email),
+    password: row.password || "",
+    role: row.role || "restaurant",
+    category: row.category || "",
+    description: row.description || "",
+    status: row.status || "pending",
+    commission: Number(row.commission ?? row.commission_percent ?? 15),
+    commissionPercent: Number(row.commission_percent ?? row.commission ?? 15),
+    rating: row.rating || "",
+    delivery: row.delivery || "",
+    time: row.time || "",
+    open: row.open !== false,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : "",
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : ""
+  };
+}
+
+function mapDbDish(row) {
+  return {
+    id: row.id || "",
+    restaurantEmail: normalizeEmail(row.restaurant_email),
+    restaurantName: row.restaurant_name || "Restaurante",
+    restaurantAddress: row.restaurant_address || "",
+    name: row.name || "Plato",
+    price: Number(row.price || 0),
+    description: row.description || "",
+    category: row.category || "",
+    prepTime: row.prep_time || "",
+    emoji: row.emoji || "",
+    image: row.image || "",
+    available: row.available !== false,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : "",
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : ""
+  };
+}
+
+async function getUsersFromPostgres() {
+  const result = await pool.query(`
+    SELECT *
+    FROM users
+    ORDER BY created_at DESC NULLS LAST, id ASC
+  `);
+  return result.rows.map(mapDbUser);
+}
+
+async function getUserByEmailFromPostgres(email) {
+  const result = await pool.query(
+    `SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+    [normalizeEmail(email)]
+  );
+  return result.rows[0] ? mapDbUser(result.rows[0]) : null;
+}
+
+async function getRestaurantsFromPostgres() {
+  const result = await pool.query(`
+    SELECT *
+    FROM restaurants
+    ORDER BY created_at DESC NULLS LAST, name ASC
+  `);
+  return result.rows.map(mapDbRestaurant);
+}
+
+async function getRestaurantByEmailFromPostgres(email) {
+  const result = await pool.query(
+    `SELECT * FROM restaurants WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+    [normalizeEmail(email)]
+  );
+  return result.rows[0] ? mapDbRestaurant(result.rows[0]) : null;
+}
+
+async function getDishesByRestaurantEmailFromPostgres(email) {
+  const result = await pool.query(
+    `
+    SELECT *
+    FROM dishes
+    WHERE LOWER(restaurant_email) = LOWER($1)
+    ORDER BY created_at DESC NULLS LAST, name ASC
+    `,
+    [normalizeEmail(email)]
+  );
+  return result.rows.map(mapDbDish);
+}
+
 function parseCookies(req) {
   const header = req.headers.cookie || "";
 
@@ -839,64 +957,132 @@ app.post("/logout", (req, res) => {
   });
 });
 
-app.get("/users", (req, res) => {
-  const users = readJsonArrayFile(USERS_FILE);
+app.get("/users", async (req, res) => {
+  try {
+    const users = await getUsersFromPostgres();
 
-  res.json({
-    ok: true,
-    total: users.length,
-    users
-  });
-});
+    return res.json({
+      ok: true,
+      source: "postgres",
+      total: users.length,
+      users
+    });
+  } catch (error) {
+    console.error("Error leyendo usuarios desde PostgreSQL, usando JSON:", error.message);
 
-app.get("/users/:email", (req, res) => {
-  const users = readJsonArrayFile(USERS_FILE);
-  const email = normalizeEmail(req.params.email);
+    const users = readJsonArrayFile(USERS_FILE);
 
-  const user = users.find((item) => normalizeEmail(item.email) === email);
-
-  if (!user) {
-    return res.status(404).json({
-      ok: false,
-      message: "Usuario no encontrado"
+    return res.json({
+      ok: true,
+      source: "json_fallback",
+      total: users.length,
+      users
     });
   }
-
-  res.json({
-    ok: true,
-    user
-  });
 });
 
-app.get("/restaurants", (req, res) => {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-
-  res.json({
-    ok: true,
-    total: restaurants.length,
-    restaurants
-  });
-});
-
-app.get("/restaurants/:email", (req, res) => {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+app.get("/users/:email", async (req, res) => {
   const email = normalizeEmail(req.params.email);
 
-  const restaurant = restaurants.find(
-    (item) => normalizeEmail(item.email) === email
-  );
+  try {
+    const user = await getUserByEmailFromPostgres(email);
 
-  if (!restaurant) {
-    return res.status(404).json({
-      ok: false,
-      message: "Restaurante no encontrado"
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        message: "Usuario no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      user
+    });
+  } catch (error) {
+    console.error("Error leyendo usuario desde PostgreSQL, usando JSON:", error.message);
+
+    const users = readJsonArrayFile(USERS_FILE);
+    const user = users.find((item) => normalizeEmail(item.email) === email);
+
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        message: "Usuario no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "json_fallback",
+      user
     });
   }
+});
 
-  res.json({
-    ok: true,
-    restaurant
-  });
+app.get("/restaurants", async (req, res) => {
+  try {
+    const restaurants = await getRestaurantsFromPostgres();
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      total: restaurants.length,
+      restaurants
+    });
+  } catch (error) {
+    console.error("Error leyendo restaurantes desde PostgreSQL, usando JSON:", error.message);
+
+    const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+
+    return res.json({
+      ok: true,
+      source: "json_fallback",
+      total: restaurants.length,
+      restaurants
+    });
+  }
+});
+
+app.get("/restaurants/:email", async (req, res) => {
+  const email = normalizeEmail(req.params.email);
+
+  try {
+    const restaurant = await getRestaurantByEmailFromPostgres(email);
+
+    if (!restaurant) {
+      return res.status(404).json({
+        ok: false,
+        message: "Restaurante no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      restaurant
+    });
+  } catch (error) {
+    console.error("Error leyendo restaurante desde PostgreSQL, usando JSON:", error.message);
+
+    const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+    const restaurant = restaurants.find(
+      (item) => normalizeEmail(item.email) === email
+    );
+
+    if (!restaurant) {
+      return res.status(404).json({
+        ok: false,
+        message: "Restaurante no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "json_fallback",
+      restaurant
+    });
+  }
 });
 
 /* ======================================================
@@ -907,19 +1093,33 @@ app.get("/restaurants/:email", (req, res) => {
    - PUT editar plato
    - DELETE eliminar plato
 ====================================================== */
-app.get("/restaurants/:email/dishes", (req, res) => {
+app.get("/restaurants/:email/dishes", async (req, res) => {
   const email = normalizeEmail(req.params.email);
-  const dishes = readJsonArrayFile(DISHES_FILE);
 
-  const restaurantDishes = dishes.filter(
-    (dish) => normalizeEmail(dish.restaurantEmail) === email
-  );
+  try {
+    const restaurantDishes = await getDishesByRestaurantEmailFromPostgres(email);
 
-  res.json({
-    ok: true,
-    total: restaurantDishes.length,
-    dishes: restaurantDishes
-  });
+    return res.json({
+      ok: true,
+      source: "postgres",
+      total: restaurantDishes.length,
+      dishes: restaurantDishes
+    });
+  } catch (error) {
+    console.error("Error leyendo platos desde PostgreSQL, usando JSON:", error.message);
+
+    const dishes = readJsonArrayFile(DISHES_FILE);
+    const restaurantDishes = dishes.filter(
+      (dish) => normalizeEmail(dish.restaurantEmail) === email
+    );
+
+    return res.json({
+      ok: true,
+      source: "json_fallback",
+      total: restaurantDishes.length,
+      dishes: restaurantDishes
+    });
+  }
 });
 
 app.post("/restaurants/:email/dishes", (req, res) => {
