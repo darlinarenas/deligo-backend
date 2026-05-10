@@ -43,6 +43,150 @@ const ADMINS_FILE = path.join(__dirname, "admins.json");
 const SESSIONS_FILE = path.join(__dirname, "sessions.json");
 
 /* ======================================================
+   POSTGRESQL - CREACIÓN SEGURA DE TABLAS BASE
+   IMPORTANTE:
+   - Esta fase NO reemplaza todavía los JSON.
+   - Solo prepara la base de datos real para DELI GO.
+   - Los endpoints actuales siguen funcionando igual con JSON.
+   - Más adelante migraremos datos JSON -> PostgreSQL paso a paso.
+====================================================== */
+async function initDatabaseTables() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        full_name TEXT,
+        name TEXT,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT,
+        phone TEXT,
+        address TEXT,
+        reference TEXT,
+        role TEXT DEFAULT 'customer',
+        status TEXT DEFAULT 'active',
+        latitude TEXT,
+        longitude TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS restaurants (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT,
+        phone TEXT,
+        address TEXT,
+        category TEXT,
+        description TEXT,
+        role TEXT DEFAULT 'restaurant',
+        status TEXT DEFAULT 'pending',
+        commission NUMERIC DEFAULT 15,
+        commission_percent NUMERIC DEFAULT 15,
+        rating TEXT,
+        delivery TEXT,
+        time TEXT,
+        open BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS dishes (
+        id TEXT PRIMARY KEY,
+        restaurant_id TEXT,
+        restaurant_email TEXT NOT NULL,
+        restaurant_name TEXT,
+        restaurant_address TEXT,
+        name TEXT NOT NULL,
+        description TEXT,
+        price NUMERIC DEFAULT 0,
+        category TEXT,
+        prep_time TEXT,
+        emoji TEXT,
+        image TEXT,
+        available BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        customer_email TEXT,
+        customer_name TEXT,
+        customer_phone TEXT,
+        customer_address TEXT,
+        restaurant_id TEXT,
+        restaurant_email TEXT NOT NULL,
+        restaurant_name TEXT,
+        status TEXT DEFAULT 'pendiente',
+        total NUMERIC DEFAULT 0,
+        payment_method TEXT,
+        payment_status TEXT DEFAULT 'pendiente',
+        notes TEXT,
+        delivery_address TEXT,
+        delivery_reference TEXT,
+        latitude TEXT,
+        longitude TEXT,
+        date_text TEXT,
+        time_text TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS order_items (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        dish_id TEXT,
+        name_snapshot TEXT NOT NULL,
+        price_snapshot NUMERIC DEFAULT 0,
+        quantity NUMERIC DEFAULT 1,
+        subtotal NUMERIC DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admins (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT,
+        role TEXT DEFAULT 'admin',
+        status TEXT DEFAULT 'active',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        id TEXT PRIMARY KEY,
+        admin_email TEXT NOT NULL,
+        role TEXT DEFAULT 'admin',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        expires_at TIMESTAMPTZ
+      );
+    `);
+
+    console.log("✅ Tablas PostgreSQL verificadas/creadas correctamente");
+  } catch (error) {
+    console.error("❌ Error creando tablas PostgreSQL:", error.message);
+  }
+}
+
+initDatabaseTables();
+
+
+/* ======================================================
    CORS DEFINITIVO PARA FRONTEND EN VERCEL
    - Necesario porque el frontend usa credentials: "include".
    - NO se puede usar origin: "*" con cookies.
@@ -1669,6 +1813,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
