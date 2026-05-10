@@ -1336,7 +1336,7 @@ app.post("/register", (req, res) => {
 /* ======================================================
    REGISTRO RESTAURANTE
 ====================================================== */
-app.post("/register-restaurant", (req, res) => {
+app.post("/register-restaurant", async (req, res) => {
   const users = readJsonArrayFile(USERS_FILE);
   const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
 
@@ -1378,6 +1378,47 @@ app.post("/register-restaurant", (req, res) => {
     commission: 15,
     createdAt: new Date().toISOString()
   };
+
+  try {
+    await pool.query(
+      `
+      INSERT INTO restaurants (
+        id,
+        name,
+        email,
+        password,
+        phone,
+        address,
+        role,
+        status,
+        commission,
+        commission_percent,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW()
+      )
+      `,
+      [
+        newRestaurant.id,
+        newRestaurant.name,
+        newRestaurant.email,
+        newRestaurant.password,
+        newRestaurant.phone,
+        newRestaurant.address,
+        "restaurant",
+        "pending",
+        15,
+        15
+      ]
+    );
+
+    console.log("✅ Restaurante guardado en PostgreSQL:", newRestaurant.email);
+
+  } catch (error) {
+    console.error("❌ Error guardando restaurante en PostgreSQL:", error.message);
+  }
 
   restaurants.push(newRestaurant);
   writeJsonArrayFile(RESTAURANTS_FILE, restaurants);
