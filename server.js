@@ -833,6 +833,363 @@ async function getDishesByRestaurantEmailFromPostgres(email) {
   return result.rows.map(mapDbDish);
 }
 
+
+/* ======================================================
+   POSTGRESQL - HELPERS REALES PARA PLATOS Y PEDIDOS
+   - Mantienen la forma de datos que ya consume el frontend.
+   - La fuente principal desde esta versión es PostgreSQL.
+   - JSON queda solo como respaldo manual/histórico, no como fuente viva.
+====================================================== */
+function normalizeOrderStatus(status) {
+  const normalizedStatus = String(status || "pendiente")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/-/g, "_");
+
+  return normalizedStatus === "finalizado" ? "entregado" : normalizedStatus;
+}
+
+function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
+  const items = itemRows.map((item) => ({
+    id: item.dish_id || "",
+    dishId: item.dish_id || "",
+    name: item.name_snapshot || "Producto",
+    dishName: item.name_snapshot || "Producto",
+    qty: Number(item.quantity || 1),
+    quantity: Number(item.quantity || 1),
+    price: Number(item.price_snapshot || 0),
+    unitPrice: Number(item.price_snapshot || 0),
+    subtotal: Number(item.subtotal || 0)
+  }));
+
+  return {
+    id: orderRow.id || "",
+    userId: orderRow.user_id || "",
+    restaurantEmail: normalizeEmail(orderRow.restaurant_email),
+    restaurantName: orderRow.restaurant_name || "Restaurante",
+    restaurant: {
+      id: orderRow.restaurant_id || "",
+      email: normalizeEmail(orderRow.restaurant_email),
+      name: orderRow.restaurant_name || "Restaurante"
+    },
+    items,
+    total: Number(orderRow.total || 0),
+    customer: {
+      fullName: orderRow.customer_name || "",
+      name: orderRow.customer_name || "",
+      phone: orderRow.customer_phone || "",
+      address: orderRow.customer_address || orderRow.delivery_address || "",
+      email: normalizeEmail(orderRow.customer_email || ""),
+      reference: orderRow.delivery_reference || "",
+      location: {
+        lat: orderRow.latitude || "",
+        lng: orderRow.longitude || ""
+      }
+    },
+    customerEmail: normalizeEmail(orderRow.customer_email || ""),
+    customerName: orderRow.customer_name || "",
+    status: orderRow.status || "pendiente",
+    paymentMethod: orderRow.payment_method || "pendiente",
+    paymentStatus: orderRow.payment_status || "pendiente",
+    notes: orderRow.notes || "",
+    deliveryAddress: orderRow.delivery_address || orderRow.customer_address || "",
+    deliveryReference: orderRow.delivery_reference || "",
+    latitude: orderRow.latitude || "",
+    longitude: orderRow.longitude || "",
+    date: orderRow.date_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleDateString("es-VE") : ""),
+    time: orderRow.time_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" }) : ""),
+    createdAt: orderRow.created_at ? new Date(orderRow.created_at).toISOString() : "",
+    updatedAt: orderRow.updated_at ? new Date(orderRow.updated_at).toISOString() : ""
+  };
+}
+
+async function getOrdersFromPostgres({ restaurantEmail = null, customerEmail = null } = {}) {
+  const values = [];
+  const where = [];
+
+  if (restaurantEmail) {
+    values.push(normalizeEmail(restaurantEmail));
+    where.push(`LOWER(restaurant_email) = LOWER($${values.length})`);
+  }
+
+  if (customerEmail) {
+    values.push(normalizeEmail(customerEmail));
+    where.push(`LOWER(customer_email) = LOWER($${values.length})`);
+  }
+
+  const orderResult = await pool.query(
+    `
+    SELECT *
+    FROM orders
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY created_at DESC NULLS LAST, id DESC
+    `,
+    values
+  );
+
+  const orders = orderResult.rows;
+  if (!orders.length) return [];
+
+  const orderIds = orders.map((order) => order.id);
+  const itemsResult = await pool.query(
+    `
+    SELECT *
+    FROM order_items
+    WHERE order_id = ANY($1::text[])
+    ORDER BY created_at ASC NULLS LAST, id ASC
+    `,
+    [orderIds]
+  );
+
+  const itemsByOrderId = itemsResult.rows.reduce((acc, item) => {
+    if (!acc[item.order_id]) acc[item.order_id] = [];
+    acc[item.order_id].push(item);
+    return acc;
+  }, {});
+
+  return orders.map((order) => buildCompatibleOrderFromRow(order, itemsByOrderId[order.id] || []));
+}
+
+async function getOrderByIdFromPostgres(orderId) {
+  const orderResult = await pool.query(
+    `SELECT * FROM orders WHERE id = $1 LIMIT 1`,
+    [String(orderId || "").trim()]
+  );
+
+  const order = orderResult.rows[0];
+  if (!order) return null;
+
+  const itemsResult = await pool.query(
+    `SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at ASC NULLS LAST, id ASC`,
+    [order.id]
+  );
+
+  return buildCompatibleOrderFromRow(order, itemsResult.rows);
+}
+
+async function createDishInPostgres(restaurant, body) {
+  const id = generateId("dish");
+  const result = await pool.query(
+    `
+    INSERT INTO dishes (
+      id, restaurant_id, restaurant_email, restaurant_name, restaurant_address,
+      name, description, price, category, prep_time, emoji, image, available,
+      created_at, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
+    RETURNING *
+    `,
+    [
+      id,
+      restaurant.id || null,
+      normalizeEmail(restaurant.email),
+      restaurant.name || "Restaurante",
+      restaurant.address || "",
+      normalizeText(body.name),
+      normalizeText(body.description),
+      toNumberValue(body.price, 0),
+      normalizeText(body.category),
+      normalizeText(body.prepTime),
+      normalizeText(body.emoji),
+      normalizeText(body.image),
+      body.available !== false
+    ]
+  );
+
+  return mapDbDish(result.rows[0]);
+}
+
+async function updateDishInPostgres(email, dishId, body) {
+  const currentResult = await pool.query(
+    `SELECT * FROM dishes WHERE id = $1 AND LOWER(restaurant_email) = LOWER($2) LIMIT 1`,
+    [String(dishId || "").trim(), normalizeEmail(email)]
+  );
+
+  const current = currentResult.rows[0];
+  if (!current) return null;
+
+  const finalName = body.name != null ? normalizeText(body.name) : current.name;
+  const finalPrice = body.price != null ? toNumberValue(body.price, 0) : Number(current.price || 0);
+  const finalDescription = body.description != null ? normalizeText(body.description) : (current.description || "");
+  const finalCategory = body.category != null ? normalizeText(body.category) : (current.category || "");
+
+  if (!finalName || !finalDescription || !finalCategory || finalPrice <= 0) {
+    const error = new Error("El plato actualizado debe tener nombre, precio, descripción y categoría");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const result = await pool.query(
+    `
+    UPDATE dishes
+    SET
+      name = $1,
+      price = $2,
+      description = $3,
+      category = $4,
+      prep_time = $5,
+      emoji = $6,
+      image = $7,
+      available = $8,
+      updated_at = NOW()
+    WHERE id = $9 AND LOWER(restaurant_email) = LOWER($10)
+    RETURNING *
+    `,
+    [
+      finalName,
+      finalPrice,
+      finalDescription,
+      finalCategory,
+      body.prepTime != null ? normalizeText(body.prepTime) : (current.prep_time || ""),
+      body.emoji != null ? normalizeText(body.emoji) : (current.emoji || ""),
+      body.image != null ? normalizeText(body.image) : (current.image || ""),
+      body.available != null ? body.available !== false : current.available !== false,
+      String(dishId || "").trim(),
+      normalizeEmail(email)
+    ]
+  );
+
+  return mapDbDish(result.rows[0]);
+}
+
+async function deleteDishFromPostgres(email, dishId) {
+  const result = await pool.query(
+    `
+    DELETE FROM dishes
+    WHERE id = $1 AND LOWER(restaurant_email) = LOWER($2)
+    RETURNING *
+    `,
+    [String(dishId || "").trim(), normalizeEmail(email)]
+  );
+
+  return result.rows[0] ? mapDbDish(result.rows[0]) : null;
+}
+
+async function createOrderInPostgres(body) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const restaurantEmail = normalizeEmail(body.restaurantEmail || body.restaurant?.email || "");
+    const items = Array.isArray(body.items) ? body.items : [];
+    const customer = body.customer || {};
+
+    if (!restaurantEmail || !items.length || !customer) {
+      const error = new Error("Datos incompletos del pedido");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const restaurantResult = await client.query(
+      `SELECT * FROM restaurants WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [restaurantEmail]
+    );
+
+    const restaurant = restaurantResult.rows[0];
+    if (!restaurant) {
+      const error = new Error("Restaurante no encontrado");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const customerEmail = normalizeEmail(customer.email || body.customerEmail || body.userEmail || "");
+    let userId = body.userId || null;
+
+    if (customerEmail && !userId) {
+      const userResult = await client.query(
+        `SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [customerEmail]
+      );
+      userId = userResult.rows[0]?.id || null;
+    }
+
+    const id = String(body.id || generateId("order")).trim();
+    const normalizedItems = items.map((item) => {
+      const quantity = toNumberValue(item.qty ?? item.quantity, 1);
+      const price = toNumberValue(item.price ?? item.unitPrice, 0);
+      return {
+        id: String(item.id || item.dishId || "").trim(),
+        name: normalizeText(item.name || item.dishName || "Producto"),
+        qty: quantity,
+        price,
+        subtotal: toNumberValue(item.subtotal, quantity * price)
+      };
+    });
+
+    const calculatedTotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
+    const total = toNumberValue(body.total, calculatedTotal);
+    const createdAt = toDateValue(body.createdAt) || new Date().toISOString();
+
+    await client.query(
+      `
+      INSERT INTO orders (
+        id, user_id, customer_email, customer_name, customer_phone, customer_address,
+        restaurant_id, restaurant_email, restaurant_name, status, total,
+        payment_method, payment_status, notes, delivery_address, delivery_reference,
+        latitude, longitude, date_text, time_text, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+      RETURNING *
+      `,
+      [
+        id,
+        userId,
+        customerEmail || null,
+        normalizeText(customer.fullName || customer.name || body.customerName || ""),
+        normalizeText(customer.phone || body.customerPhone || ""),
+        normalizeText(customer.address || body.customerAddress || ""),
+        restaurant.id || null,
+        restaurantEmail,
+        body.restaurantName || restaurant.name || "Restaurante",
+        normalizeOrderStatus(body.status || "pendiente"),
+        total,
+        normalizeText(body.paymentMethod || "pendiente"),
+        normalizeText(body.paymentStatus || "pendiente"),
+        normalizeText(body.notes),
+        normalizeText(body.deliveryAddress || customer.address || ""),
+        normalizeText(body.deliveryReference || customer.reference || ""),
+        normalizeText(body.latitude || body.location?.lat || customer.location?.lat || ""),
+        normalizeText(body.longitude || body.location?.lng || customer.location?.lng || ""),
+        normalizeText(body.date || new Date(createdAt).toLocaleDateString("es-VE")),
+        normalizeText(body.time || new Date(createdAt).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })),
+        createdAt
+      ]
+    );
+
+    for (let index = 0; index < normalizedItems.length; index += 1) {
+      const item = normalizedItems[index];
+      await client.query(
+        `
+        INSERT INTO order_items (
+          id, order_id, dish_id, name_snapshot, price_snapshot,
+          quantity, subtotal, created_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+        `,
+        [
+          `${id}_item_${index}_${item.id || "sin_id"}`,
+          id,
+          item.id || null,
+          item.name,
+          item.price,
+          item.qty,
+          item.subtotal
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+    return await getOrderByIdFromPostgres(id);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function parseCookies(req) {
   const header = req.headers.cookie || "";
 
@@ -1107,148 +1464,105 @@ app.get("/restaurants/:email/dishes", async (req, res) => {
   }
 });
 
-app.post("/restaurants/:email/dishes", (req, res) => {
+app.post("/restaurants/:email/dishes", async (req, res) => {
   const email = normalizeEmail(req.params.email);
-  const dishes = readJsonArrayFile(DISHES_FILE);
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
+  const body = req.body || {};
 
-  const restaurant = restaurants.find(
-    (item) => normalizeEmail(item.email) === email
-  );
-
-  if (!restaurant) {
-    return res.status(404).json({
-      ok: false,
-      message: "Restaurante no encontrado"
-    });
-  }
-
-  const {
-    name,
-    price,
-    description,
-    category,
-    prepTime,
-    emoji,
-    available
-  } = req.body || {};
-
-  if (!name || !price || !description || !category) {
+  if (!body.name || !body.price || !body.description || !body.category) {
     return res.status(400).json({
       ok: false,
       message: "Faltan campos obligatorios del plato"
     });
   }
 
-  const newDish = {
-    id: generateId("dish"),
-    restaurantEmail: email,
-    restaurantName: restaurant.name || "Restaurante",
-    restaurantAddress: restaurant.address || "",
-    name: normalizeText(name),
-    price: Number(price || 0),
-    description: normalizeText(description),
-    category: normalizeText(category),
-    prepTime: normalizeText(prepTime),
-    emoji: normalizeText(emoji),
-    available: available !== false,
-    createdAt: new Date().toISOString()
-  };
+  try {
+    const restaurant = await getRestaurantByEmailFromPostgres(email);
 
-  dishes.push(newDish);
-  writeJsonArrayFile(DISHES_FILE, dishes);
+    if (!restaurant) {
+      return res.status(404).json({
+        ok: false,
+        message: "Restaurante no encontrado"
+      });
+    }
 
-  res.status(201).json({
-    ok: true,
-    message: "Plato creado correctamente",
-    dish: newDish
-  });
-});
+    const newDish = await createDishInPostgres(restaurant, body);
 
-app.put("/restaurants/:email/dishes/:dishId", (req, res) => {
-  const email = normalizeEmail(req.params.email);
-  const dishId = String(req.params.dishId || "").trim();
-  const dishes = readJsonArrayFile(DISHES_FILE);
+    return res.status(201).json({
+      ok: true,
+      source: "postgres",
+      message: "Plato creado correctamente",
+      dish: newDish
+    });
+  } catch (error) {
+    console.error("Error creando plato en PostgreSQL:", error.message);
 
-  const index = dishes.findIndex(
-    (dish) =>
-      String(dish.id).trim() === dishId &&
-      normalizeEmail(dish.restaurantEmail) === email
-  );
-
-  if (index === -1) {
-    return res.status(404).json({
+    return res.status(error.statusCode || 500).json({
       ok: false,
-      message: "Plato no encontrado"
+      message: error.message || "Error creando plato en PostgreSQL"
     });
   }
+});
 
-  const currentDish = dishes[index];
+app.put("/restaurants/:email/dishes/:dishId", async (req, res) => {
+  const email = normalizeEmail(req.params.email);
+  const dishId = String(req.params.dishId || "").trim();
   const body = req.body || {};
 
-  const updatedDish = {
-    ...currentDish,
-    name: body.name != null ? normalizeText(body.name) : currentDish.name,
-    price: body.price != null ? Number(body.price || 0) : currentDish.price,
-    description:
-      body.description != null
-        ? normalizeText(body.description)
-        : currentDish.description,
-    category:
-      body.category != null ? normalizeText(body.category) : currentDish.category,
-    prepTime:
-      body.prepTime != null ? normalizeText(body.prepTime) : currentDish.prepTime,
-    emoji: body.emoji != null ? normalizeText(body.emoji) : currentDish.emoji,
-    available:
-      body.available != null ? body.available !== false : currentDish.available,
-    updatedAt: new Date().toISOString()
-  };
+  try {
+    const updatedDish = await updateDishInPostgres(email, dishId, body);
 
-  if (!updatedDish.name || !updatedDish.price || !updatedDish.description || !updatedDish.category) {
-    return res.status(400).json({
+    if (!updatedDish) {
+      return res.status(404).json({
+        ok: false,
+        message: "Plato no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      message: "Plato actualizado correctamente",
+      dish: updatedDish
+    });
+  } catch (error) {
+    console.error("Error actualizando plato en PostgreSQL:", error.message);
+
+    return res.status(error.statusCode || 500).json({
       ok: false,
-      message: "El plato actualizado debe tener nombre, precio, descripción y categoría"
+      message: error.message || "Error actualizando plato en PostgreSQL"
     });
   }
-
-  dishes[index] = updatedDish;
-  writeJsonArrayFile(DISHES_FILE, dishes);
-
-  res.json({
-    ok: true,
-    message: "Plato actualizado correctamente",
-    dish: updatedDish
-  });
 });
 
-app.delete("/restaurants/:email/dishes/:dishId", (req, res) => {
+app.delete("/restaurants/:email/dishes/:dishId", async (req, res) => {
   const email = normalizeEmail(req.params.email);
   const dishId = String(req.params.dishId || "").trim();
-  const dishes = readJsonArrayFile(DISHES_FILE);
 
-  const index = dishes.findIndex(
-    (dish) =>
-      String(dish.id).trim() === dishId &&
-      normalizeEmail(dish.restaurantEmail) === email
-  );
+  try {
+    const deletedDish = await deleteDishFromPostgres(email, dishId);
 
-  if (index === -1) {
-    return res.status(404).json({
+    if (!deletedDish) {
+      return res.status(404).json({
+        ok: false,
+        message: "Plato no encontrado"
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      message: "Plato eliminado correctamente",
+      dish: deletedDish
+    });
+  } catch (error) {
+    console.error("Error eliminando plato en PostgreSQL:", error.message);
+
+    return res.status(500).json({
       ok: false,
-      message: "Plato no encontrado"
+      message: "Error eliminando plato en PostgreSQL",
+      error: error.message
     });
   }
-
-  const deletedDish = dishes[index];
-  const updatedDishes = dishes.filter((_, i) => i !== index);
-
-  writeJsonArrayFile(DISHES_FILE, updatedDishes);
-
-  res.json({
-    ok: true,
-    message: "Plato eliminado correctamente",
-    dish: deletedDish
-  });
 });
 
 /* ======================================================
@@ -1504,114 +1818,96 @@ app.post("/login", async (req, res) => {
 });
 
 /* ======================================================
-   PEDIDOS
+   PEDIDOS - POSTGRESQL REAL
+   - Crea pedidos en orders + order_items.
+   - Lee pedidos desde PostgreSQL.
+   - Actualiza estados en PostgreSQL.
+   - Mantiene el mismo formato que ya consume el frontend.
 ====================================================== */
-app.post("/orders", (req, res) => {
-  const orders = readJsonArrayFile(ORDERS_FILE);
+app.post("/orders", async (req, res) => {
+  try {
+    const newOrder = await createOrderInPostgres(req.body || {});
 
-  const {
-    id,
-    restaurantEmail,
-    restaurantName,
-    items,
-    total,
-    customer,
-    status,
-    paymentMethod,
-    notes,
-    date,
-    time,
-    createdAt
-  } = req.body;
+    return res.status(201).json({
+      ok: true,
+      source: "postgres",
+      message: "Pedido creado correctamente",
+      order: newOrder
+    });
+  } catch (error) {
+    console.error("Error creando pedido en PostgreSQL:", error.message);
 
-  if (!restaurantEmail || !Array.isArray(items) || !items.length || !customer) {
-    return res.status(400).json({
+    return res.status(error.statusCode || 500).json({
       ok: false,
-      message: "Datos incompletos del pedido"
+      message: error.message || "Error creando pedido en PostgreSQL"
     });
   }
-
-  const newOrder = {
-    id: id || generateId("order"),
-    restaurantEmail: normalizeEmail(restaurantEmail),
-    restaurantName: restaurantName || "Restaurante",
-    items: items.map((item) => ({
-      id: item.id || "",
-      name: item.name || "Producto",
-      qty: Number(item.qty || 0),
-      price: Number(item.price || 0),
-      subtotal: Number(item.subtotal || (Number(item.qty || 0) * Number(item.price || 0)))
-    })),
-    total: Number(total || 0),
-    customer: {
-      fullName: customer.fullName || customer.name || "",
-      phone: customer.phone || "",
-      address: customer.address || "",
-      email: normalizeEmail(customer.email || "")
-    },
-    status: status || "pendiente",
-    paymentMethod: paymentMethod || "pendiente",
-    notes: notes || "",
-    date: date || new Date().toLocaleDateString("es-VE"),
-    time: time || new Date().toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" }),
-    createdAt: createdAt || new Date().toISOString()
-  };
-
-  orders.unshift(newOrder);
-  writeJsonArrayFile(ORDERS_FILE, orders);
-
-  res.status(201).json({
-    ok: true,
-    message: "Pedido creado correctamente",
-    order: newOrder
-  });
 });
 
-app.get("/orders", (req, res) => {
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  res.json(orders);
+app.get("/orders", async (req, res) => {
+  try {
+    const orders = await getOrdersFromPostgres();
+    return res.json(orders);
+  } catch (error) {
+    console.error("Error leyendo pedidos desde PostgreSQL:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo pedidos desde PostgreSQL",
+      error: error.message
+    });
+  }
 });
 
-app.get("/orders/restaurant/:email", (req, res) => {
-  const orders = readJsonArrayFile(ORDERS_FILE);
+app.get("/orders/restaurant/:email", async (req, res) => {
   const email = normalizeEmail(req.params.email);
 
-  const filtered = orders.filter(
-    (order) => normalizeEmail(order.restaurantEmail) === email
-  );
+  try {
+    const orders = await getOrdersFromPostgres({ restaurantEmail: email });
 
-  res.json({
-    ok: true,
-    total: filtered.length,
-    orders: filtered
-  });
+    return res.json({
+      ok: true,
+      source: "postgres",
+      total: orders.length,
+      orders
+    });
+  } catch (error) {
+    console.error("Error leyendo pedidos del restaurante desde PostgreSQL:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo pedidos del restaurante desde PostgreSQL",
+      error: error.message
+    });
+  }
 });
 
-app.get("/orders/customer/:email", (req, res) => {
-  const orders = readJsonArrayFile(ORDERS_FILE);
+app.get("/orders/customer/:email", async (req, res) => {
   const email = normalizeEmail(req.params.email);
 
-  const filtered = orders.filter(
-    (order) => normalizeEmail(order.customer?.email) === email
-  );
+  try {
+    const orders = await getOrdersFromPostgres({ customerEmail: email });
 
-  res.json({
-    ok: true,
-    total: filtered.length,
-    orders: filtered
-  });
+    return res.json({
+      ok: true,
+      source: "postgres",
+      total: orders.length,
+      orders
+    });
+  } catch (error) {
+    console.error("Error leyendo pedidos del cliente desde PostgreSQL:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo pedidos del cliente desde PostgreSQL",
+      error: error.message
+    });
+  }
 });
 
-app.patch("/orders/:id/status", (req, res) => {
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  const { id } = req.params;
-  const { status } = req.body;
-
-  const normalizedStatus = String(status || "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, "_")
-    .replace(/-/g, "_");
+app.patch("/orders/:id/status", async (req, res) => {
+  const orderId = String(req.params.id || "").trim();
+  const normalizedStatus = normalizeOrderStatus(req.body?.status);
 
   const validStatuses = [
     "pendiente",
@@ -1619,8 +1915,7 @@ app.patch("/orders/:id/status", (req, res) => {
     "preparando",
     "listo",
     "en_camino",
-    "entregado",
-    "finalizado"
+    "entregado"
   ];
 
   if (!validStatuses.includes(normalizedStatus)) {
@@ -1630,29 +1925,41 @@ app.patch("/orders/:id/status", (req, res) => {
     });
   }
 
-  const index = orders.findIndex(
-    (order) => String(order.id).trim() === String(id).trim()
-  );
+  try {
+    const result = await pool.query(
+      `
+      UPDATE orders
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+      `,
+      [normalizedStatus, orderId]
+    );
 
-  if (index === -1) {
-    return res.status(404).json({
+    if (!result.rows[0]) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pedido no encontrado"
+      });
+    }
+
+    const order = await getOrderByIdFromPostgres(orderId);
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      message: "Estado actualizado correctamente",
+      order
+    });
+  } catch (error) {
+    console.error("Error actualizando estado del pedido en PostgreSQL:", error.message);
+
+    return res.status(500).json({
       ok: false,
-      message: "Pedido no encontrado"
+      message: "Error actualizando estado del pedido en PostgreSQL",
+      error: error.message
     });
   }
-
-  orders[index] = {
-    ...orders[index],
-    status: normalizedStatus === "finalizado" ? "entregado" : normalizedStatus
-  };
-
-  writeJsonArrayFile(ORDERS_FILE, orders);
-
-  res.json({
-    ok: true,
-    message: "Estado actualizado correctamente",
-    order: orders[index]
-  });
 });
 
 
@@ -1719,18 +2026,19 @@ app.post("/admin/login", async (req, res) => {
 });
 
 /* ======================================================
-   ADMIN DATOS - USUARIOS Y RESTAURANTES DESDE POSTGRESQL
-   Pedidos siguen temporalmente en JSON hasta migrar pedidos.
+   ADMIN DATOS - TODO DESDE POSTGRESQL
+   - Usuarios, restaurantes y pedidos ya salen desde PostgreSQL.
+   - Mantiene la misma estructura data.users/data.restaurants/data.orders.
 ====================================================== */
 app.get("/admin/datos", async (req, res) => {
   try {
     const users = await getUsersFromPostgres();
     const restaurants = await getRestaurantsFromPostgres();
-    const orders = readJsonArrayFile(ORDERS_FILE);
+    const orders = await getOrdersFromPostgres();
 
     return res.json({
       ok: true,
-      source: "postgres_users_restaurants_json_orders",
+      source: "postgres",
       data: {
         users,
         restaurants,
@@ -2337,100 +2645,123 @@ function findDishReference(dishes, restaurantEmail, item) {
   }) || null;
 }
 
-app.get("/stats/top-restaurants", (req, res) => {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  const rankingData = getOrdersForStats(orders);
-  const countsByRestaurant = {};
+app.get("/stats/top-restaurants", async (req, res) => {
+  try {
+    const restaurants = await getRestaurantsFromPostgres();
+    const orders = await getOrdersFromPostgres();
+    const rankingData = getOrdersForStats(orders);
+    const countsByRestaurant = {};
 
-  rankingData.orders.forEach((order) => {
-    const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
-    if (!restaurantEmail) return;
-    countsByRestaurant[restaurantEmail] = (countsByRestaurant[restaurantEmail] || 0) + 1;
-  });
+    rankingData.orders.forEach((order) => {
+      const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
+      if (!restaurantEmail) return;
+      countsByRestaurant[restaurantEmail] = (countsByRestaurant[restaurantEmail] || 0) + 1;
+    });
 
-  const topRestaurants = restaurants
-    .filter(isPublicApprovedRestaurant)
-    .map((restaurant) => {
-      const restaurantEmail = normalizeEmail(restaurant.email);
-      const totalOrders = countsByRestaurant[restaurantEmail] || 0;
-      return formatRestaurantForStats(restaurant, totalOrders);
-    })
-    .filter((restaurant) => restaurant.totalOrders > 0)
-    .sort((a, b) => b.totalOrders - a.totalOrders)
-    .slice(0, 6);
+    const topRestaurants = restaurants
+      .filter(isPublicApprovedRestaurant)
+      .map((restaurant) => {
+        const restaurantEmail = normalizeEmail(restaurant.email);
+        const totalOrders = countsByRestaurant[restaurantEmail] || 0;
+        return formatRestaurantForStats(restaurant, totalOrders);
+      })
+      .filter((restaurant) => restaurant.totalOrders > 0)
+      .sort((a, b) => b.totalOrders - a.totalOrders)
+      .slice(0, 6);
 
-  res.json({
-    ok: true,
-    label: rankingData.label,
-    period: rankingData.period,
-    total: topRestaurants.length,
-    restaurants: topRestaurants
-  });
+    return res.json({
+      ok: true,
+      source: "postgres",
+      label: rankingData.label,
+      period: rankingData.period,
+      total: topRestaurants.length,
+      restaurants: topRestaurants
+    });
+  } catch (error) {
+    console.error("Error leyendo ranking de restaurantes desde PostgreSQL:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo ranking de restaurantes desde PostgreSQL",
+      error: error.message
+    });
+  }
 });
 
-app.get("/stats/top-dishes", (req, res) => {
-  const restaurants = readJsonArrayFile(RESTAURANTS_FILE);
-  const dishes = readJsonArrayFile(DISHES_FILE);
-  const orders = readJsonArrayFile(ORDERS_FILE);
-  const rankingData = getOrdersForStats(orders);
-  const approvedRestaurantByEmail = {};
-  const countsByDish = {};
+app.get("/stats/top-dishes", async (req, res) => {
+  try {
+    const restaurants = await getRestaurantsFromPostgres();
+    const orders = await getOrdersFromPostgres();
+    const dishRows = await pool.query(`SELECT * FROM dishes ORDER BY created_at DESC NULLS LAST, name ASC`);
+    const dishes = dishRows.rows.map(mapDbDish);
+    const rankingData = getOrdersForStats(orders);
+    const approvedRestaurantByEmail = {};
+    const countsByDish = {};
 
-  restaurants
-    .filter(isPublicApprovedRestaurant)
-    .forEach((restaurant) => {
-      approvedRestaurantByEmail[normalizeEmail(restaurant.email)] = restaurant;
+    restaurants
+      .filter(isPublicApprovedRestaurant)
+      .forEach((restaurant) => {
+        approvedRestaurantByEmail[normalizeEmail(restaurant.email)] = restaurant;
+      });
+
+    rankingData.orders.forEach((order) => {
+      const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
+      const restaurant = approvedRestaurantByEmail[restaurantEmail];
+
+      if (!restaurant) return;
+
+      const items = Array.isArray(order.items) ? order.items : [];
+
+      items.forEach((item) => {
+        const qty = Number(item.qty || item.quantity || 1);
+        if (!Number.isFinite(qty) || qty <= 0) return;
+
+        const dishRef = findDishReference(dishes, restaurantEmail, item);
+        const identity = getDishIdentity(item);
+        const dishId = String(dishRef?.id || identity.id || identity.name).trim();
+        const dishName = String(dishRef?.name || identity.name || "Plato").trim();
+        const key = `${restaurantEmail}__${dishId || dishName.toLowerCase()}`;
+        const price = Number(dishRef?.price ?? item.price ?? item.unitPrice ?? 0);
+
+        if (!countsByDish[key]) {
+          countsByDish[key] = {
+            dishId,
+            dishName,
+            dishPrice: Number.isFinite(price) ? price : 0,
+            dishCategory: dishRef?.category || item.category || restaurant.category || "Comida",
+            dishEmoji: dishRef?.emoji || item.emoji || "🍽️",
+            restaurantId: restaurant.id || "",
+            restaurantEmail,
+            restaurantName: restaurant.name || order.restaurantName || "Restaurante",
+            totalQty: 0
+          };
+        }
+
+        countsByDish[key].totalQty += qty;
+      });
     });
 
-  rankingData.orders.forEach((order) => {
-    const restaurantEmail = normalizeEmail(order.restaurantEmail || order.restaurant?.email || "");
-    const restaurant = approvedRestaurantByEmail[restaurantEmail];
+    const topDishes = Object.values(countsByDish)
+      .sort((a, b) => b.totalQty - a.totalQty)
+      .slice(0, 6);
 
-    if (!restaurant) return;
-
-    const items = Array.isArray(order.items) ? order.items : [];
-
-    items.forEach((item) => {
-      const qty = Number(item.qty || item.quantity || 1);
-      if (!Number.isFinite(qty) || qty <= 0) return;
-
-      const dishRef = findDishReference(dishes, restaurantEmail, item);
-      const identity = getDishIdentity(item);
-      const dishId = String(dishRef?.id || identity.id || identity.name).trim();
-      const dishName = String(dishRef?.name || identity.name || "Plato").trim();
-      const key = `${restaurantEmail}__${dishId || dishName.toLowerCase()}`;
-      const price = Number(dishRef?.price ?? item.price ?? item.unitPrice ?? 0);
-
-      if (!countsByDish[key]) {
-        countsByDish[key] = {
-          dishId,
-          dishName,
-          dishPrice: Number.isFinite(price) ? price : 0,
-          dishCategory: dishRef?.category || item.category || restaurant.category || "Comida",
-          dishEmoji: dishRef?.emoji || item.emoji || "🍽️",
-          restaurantId: restaurant.id || "",
-          restaurantEmail,
-          restaurantName: restaurant.name || order.restaurantName || "Restaurante",
-          totalQty: 0
-        };
-      }
-
-      countsByDish[key].totalQty += qty;
+    return res.json({
+      ok: true,
+      source: "postgres",
+      label: rankingData.label,
+      period: rankingData.period,
+      total: topDishes.length,
+      dishes: topDishes
     });
-  });
+  } catch (error) {
+    console.error("Error leyendo ranking de platos desde PostgreSQL:", error.message);
 
-  const topDishes = Object.values(countsByDish)
-    .sort((a, b) => b.totalQty - a.totalQty)
-    .slice(0, 6);
-
-  res.json({
-    ok: true,
-    label: rankingData.label,
-    period: rankingData.period,
-    total: topDishes.length,
-    dishes: topDishes
-  });
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo ranking de platos desde PostgreSQL",
+      error: error.message
+    });
+  }
 });
 
 
