@@ -5,17 +5,34 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
+
 const { pool } = require("./db/postgres");
+const {
+  normalizeEmail,
+  normalizeText,
+  generateId,
+  toNullableText,
+  toNumberValue,
+  toBooleanValue,
+  toDateValue
+} = require("./utils/normalizadores");
+const crearRutasRestaurantes = require("./routes/restaurantes.routes");
+const crearRutasUsuarios = require("./routes/usuarios.routes");
+const crearRutasAuth = require("./routes/auth.routes");
+const crearRutasPedidos = require("./routes/pedidos.routes");
+const crearRutasPlatos = require("./routes/platos.routes");
+const crearRutasAdmin = require("./routes/admin.routes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 /* ======================================================
    POSTGRESQL / SUPABASE
-   - La conexión ahora está separada en db/postgres.js.
-   - server.js solo importa pool para usarlo en rutas, migración y consultas.
-   - No se cambian rutas ni lógica de negocio en este paso.
+   - La conexión fue separada a db/postgres.js.
+   - server.js mantiene las mismas rutas y la misma lógica.
+   - Solo usamos el pool exportado para seguir trabajando con PostgreSQL.
 ====================================================== */
+
 const ORDERS_FILE = path.join(__dirname, "orders.json");
 const USERS_FILE = path.join(__dirname, "users.json");
 const RESTAURANTS_FILE = path.join(__dirname, "restaurants.json");
@@ -174,28 +191,6 @@ async function initDatabaseTables() {
    - Por ahora los endpoints siguen respondiendo desde JSON.
    - Esta fase solo copia los datos actuales a PostgreSQL.
 ====================================================== */
-function toNullableText(value) {
-  const text = String(value ?? "").trim();
-  return text || null;
-}
-
-function toNumberValue(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function toBooleanValue(value, fallback = true) {
-  if (value === true || value === false) return value;
-  if (String(value).toLowerCase() === "true") return true;
-  if (String(value).toLowerCase() === "false") return false;
-  return fallback;
-}
-
-function toDateValue(value) {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
 
 function buildAdminId(admin) {
   const email = normalizeEmail(admin?.email);
@@ -684,17 +679,6 @@ function writeJsonObjectFile(filePath, data) {
   }
 }
 
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
-
-function normalizeText(value) {
-  return String(value || "").trim();
-}
-
-function generateId(prefix = "id") {
-  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-}
 
 
 /* ======================================================
@@ -1281,1228 +1265,115 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/session", async (req, res) => {
-  const session = await getSessionUser(req);
-
-  if (!session) {
-    return res.status(401).json({
-      ok: false,
-      message: "No hay sesión activa"
-    });
-  }
-
-  res.json({
-    ok: true,
-    type: session.type,
-    user: session.user,
-    admin: session.type === "admin" ? session.user : null
-  });
-});
-
-app.post("/logout", (req, res) => {
-  clearSession(req, res);
-
-  res.json({
-    ok: true,
-    message: "Sesión cerrada"
-  });
-});
-
-app.get("/users", async (req, res) => {
-  try {
-    const users = await getUsersFromPostgres();
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      total: users.length,
-      users
-    });
-  } catch (error) {
-    console.error("Error leyendo usuarios desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo usuarios desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.get("/users/:email", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-
-  try {
-    const user = await getUserByEmailFromPostgres(email);
-
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        message: "Usuario no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      user
-    });
-  } catch (error) {
-    console.error("Error leyendo usuario desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo usuario desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.get("/restaurants", async (req, res) => {
-  try {
-    const restaurants = await getRestaurantsFromPostgres();
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      total: restaurants.length,
-      restaurants
-    });
-  } catch (error) {
-    console.error("Error leyendo restaurantes desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo restaurantes desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.get("/restaurants/:email", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-
-  try {
-    const restaurant = await getRestaurantByEmailFromPostgres(email);
-
-    if (!restaurant) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      restaurant
-    });
-  } catch (error) {
-    console.error("Error leyendo restaurante desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo restaurante desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
 
 /* ======================================================
-   PLATOS DEL RESTAURANTE
-   NUEVO:
-   - GET platos por restaurante
-   - POST crear plato
-   - PUT editar plato
-   - DELETE eliminar plato
+   RUTAS AUTH MODULARIZADAS
+   - GET /session
+   - POST /logout
+   - POST /register
+   - POST /register-restaurant
+   - POST /login
+   - La lógica fue movida a routes/auth.routes.js
 ====================================================== */
-app.get("/restaurants/:email/dishes", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-
-  try {
-    const restaurantDishes = await getDishesByRestaurantEmailFromPostgres(email);
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      total: restaurantDishes.length,
-      dishes: restaurantDishes
-    });
-  } catch (error) {
-    console.error("Error leyendo platos desde PostgreSQL, usando JSON:", error.message);
-
-    const dishes = readJsonArrayFile(DISHES_FILE);
-    const restaurantDishes = dishes.filter(
-      (dish) => normalizeEmail(dish.restaurantEmail) === email
-    );
-
-    return res.json({
-      ok: true,
-      source: "json_fallback",
-      total: restaurantDishes.length,
-      dishes: restaurantDishes
-    });
-  }
-});
-
-app.post("/restaurants/:email/dishes", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-  const body = req.body || {};
-
-  if (!body.name || !body.price || !body.description || !body.category) {
-    return res.status(400).json({
-      ok: false,
-      message: "Faltan campos obligatorios del plato"
-    });
-  }
-
-  try {
-    const restaurant = await getRestaurantByEmailFromPostgres(email);
-
-    if (!restaurant) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    const newDish = await createDishInPostgres(restaurant, body);
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Plato creado correctamente",
-      dish: newDish
-    });
-  } catch (error) {
-    console.error("Error creando plato en PostgreSQL:", error.message);
-
-    return res.status(error.statusCode || 500).json({
-      ok: false,
-      message: error.message || "Error creando plato en PostgreSQL"
-    });
-  }
-});
-
-app.put("/restaurants/:email/dishes/:dishId", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-  const dishId = String(req.params.dishId || "").trim();
-  const body = req.body || {};
-
-  try {
-    const updatedDish = await updateDishInPostgres(email, dishId, body);
-
-    if (!updatedDish) {
-      return res.status(404).json({
-        ok: false,
-        message: "Plato no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Plato actualizado correctamente",
-      dish: updatedDish
-    });
-  } catch (error) {
-    console.error("Error actualizando plato en PostgreSQL:", error.message);
-
-    return res.status(error.statusCode || 500).json({
-      ok: false,
-      message: error.message || "Error actualizando plato en PostgreSQL"
-    });
-  }
-});
-
-app.delete("/restaurants/:email/dishes/:dishId", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-  const dishId = String(req.params.dishId || "").trim();
-
-  try {
-    const deletedDish = await deleteDishFromPostgres(email, dishId);
-
-    if (!deletedDish) {
-      return res.status(404).json({
-        ok: false,
-        message: "Plato no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Plato eliminado correctamente",
-      dish: deletedDish
-    });
-  } catch (error) {
-    console.error("Error eliminando plato en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error eliminando plato en PostgreSQL",
-      error: error.message
-    });
-  }
-});
+app.use("/", crearRutasAuth({
+  pool,
+  normalizeEmail,
+  normalizeText,
+  generateId,
+  mapDbUser,
+  mapDbRestaurant,
+  getUserByEmailFromPostgres,
+  getRestaurantByEmailFromPostgres,
+  getSessionUser,
+  createSession,
+  clearSession
+}));
 
 /* ======================================================
-   REGISTRO CLIENTE - SOLO POSTGRESQL
+   RUTAS USUARIOS MODULARIZADAS
+   - GET /users
+   - GET /users/:email
+   - La lógica fue movida a routes/usuarios.routes.js
+   - No cambia login, registro, admin ni pedidos.
 ====================================================== */
-app.post("/register", async (req, res) => {
-  const {
-    fullName,
-    address,
-    phone,
-    email,
-    password,
-    reference,
-    location
-  } = req.body || {};
-
-  if (!fullName || !address || !phone || !email || !password) {
-    return res.status(400).json({
-      ok: false,
-      message: "Faltan campos obligatorios"
-    });
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-
-  try {
-    const exists = await pool.query(
-      `
-      SELECT email FROM users WHERE LOWER(email) = LOWER($1)
-      UNION
-      SELECT email FROM restaurants WHERE LOWER(email) = LOWER($1)
-      LIMIT 1
-      `,
-      [normalizedEmail]
-    );
-
-    if (exists.rows.length) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const newUser = {
-      id: generateId("user"),
-      fullName: normalizeText(fullName),
-      name: normalizeText(fullName),
-      address: normalizeText(address),
-      phone: normalizeText(phone),
-      email: normalizedEmail,
-      password: String(password),
-      role: "customer",
-      status: "active",
-      reference: normalizeText(reference),
-      location: {
-        lat: location?.lat || "",
-        lng: location?.lng || ""
-      },
-      createdAt: new Date().toISOString()
-    };
-
-    const result = await pool.query(
-      `
-      INSERT INTO users (
-        id, full_name, name, email, password, phone, address, reference,
-        role, status, latitude, longitude, created_at, updated_at
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
-      RETURNING *
-      `,
-      [
-        newUser.id,
-        newUser.fullName,
-        newUser.name,
-        newUser.email,
-        newUser.password,
-        newUser.phone,
-        newUser.address,
-        newUser.reference,
-        newUser.role,
-        newUser.status,
-        newUser.location.lat,
-        newUser.location.lng
-      ]
-    );
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Usuario registrado correctamente",
-      user: mapDbUser(result.rows[0])
-    });
-  } catch (error) {
-    console.error("Error registrando usuario en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error registrando usuario en PostgreSQL",
-      error: error.message
-    });
-  }
-});
+app.use("/users", crearRutasUsuarios({
+  normalizeEmail,
+  getUsersFromPostgres,
+  getUserByEmailFromPostgres
+}));
 
 /* ======================================================
-   REGISTRO RESTAURANTE - SOLO POSTGRESQL
+   RUTAS RESTAURANTES MODULARIZADAS
+   - GET /restaurants
+   - GET /restaurants/:email
+   - La lógica fue movida a routes/restaurantes.routes.js
+   - Las rutas de platos se mantienen abajo por ahora.
 ====================================================== */
-app.post("/register-restaurant", async (req, res) => {
-  const { name, address, phone, email, password } = req.body || {};
-
-  if (!name || !address || !phone || !email || !password) {
-    return res.status(400).json({
-      ok: false,
-      message: "Faltan campos obligatorios"
-    });
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-
-  try {
-    const exists = await pool.query(
-      `
-      SELECT email FROM users WHERE LOWER(email) = LOWER($1)
-      UNION
-      SELECT email FROM restaurants WHERE LOWER(email) = LOWER($1)
-      LIMIT 1
-      `,
-      [normalizedEmail]
-    );
-
-    if (exists.rows.length) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO restaurants (
-        id, name, email, password, phone, address, role, status,
-        commission, commission_percent, open, created_at, updated_at
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
-      RETURNING *
-      `,
-      [
-        generateId("restaurant"),
-        normalizeText(name),
-        normalizedEmail,
-        String(password),
-        normalizeText(phone),
-        normalizeText(address),
-        "restaurant",
-        "pending",
-        15,
-        15,
-        true
-      ]
-    );
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Restaurante registrado correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    console.error("Error registrando restaurante en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error registrando restaurante en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   LOGIN - SOLO POSTGRESQL
-====================================================== */
-app.post("/login", async (req, res) => {
-  const { role, email, password } = req.body || {};
-
-  if (!role || !email || !password) {
-    return res.status(400).json({
-      ok: false,
-      message: "Faltan credenciales"
-    });
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-  const normalizedRole = String(role || "").trim().toLowerCase();
-
-  try {
-    if (normalizedRole === "restaurant" || normalizedRole === "restaurante") {
-      const restaurant = await getRestaurantByEmailFromPostgres(normalizedEmail);
-
-      if (!restaurant || String(restaurant.password) !== String(password)) {
-        return res.status(401).json({
-          ok: false,
-          message: "Datos inválidos para restaurante"
-        });
-      }
-
-      if (restaurant.status && restaurant.status !== "approved") {
-        return res.status(403).json({
-          ok: false,
-          message:
-            restaurant.status === "blocked"
-              ? "Tu restaurante está bloqueado. Contacta con DELI GO."
-              : "Tu restaurante está pendiente de aprobación administrativa."
-        });
-      }
-
-      const sessionUser = { ...restaurant, role: "restaurant" };
-      createSession(res, sessionUser, "user");
-
-      return res.json({
-        ok: true,
-        source: "postgres",
-        message: "Login correcto",
-        user: sessionUser
-      });
-    }
-
-    const user = await getUserByEmailFromPostgres(normalizedEmail);
-
-    if (!user || String(user.password) !== String(password)) {
-      return res.status(401).json({
-        ok: false,
-        message: "Correo o contraseña incorrectos"
-      });
-    }
-
-    const sessionUser = { ...user, role: "customer" };
-    createSession(res, sessionUser, "user");
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Login correcto",
-      user: sessionUser
-    });
-  } catch (error) {
-    console.error("Error en login PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error en login PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   PEDIDOS - POSTGRESQL REAL
-   - Crea pedidos en orders + order_items.
-   - Lee pedidos desde PostgreSQL.
-   - Actualiza estados en PostgreSQL.
-   - Mantiene el mismo formato que ya consume el frontend.
-====================================================== */
-app.post("/orders", async (req, res) => {
-  try {
-    const newOrder = await createOrderInPostgres(req.body || {});
-
-    return res.status(201).json({
-      ok: true,
-      source: "postgres",
-      message: "Pedido creado correctamente",
-      order: newOrder
-    });
-  } catch (error) {
-    console.error("Error creando pedido en PostgreSQL:", error.message);
-
-    return res.status(error.statusCode || 500).json({
-      ok: false,
-      message: error.message || "Error creando pedido en PostgreSQL"
-    });
-  }
-});
-
-app.get("/orders", async (req, res) => {
-  try {
-    const orders = await getOrdersFromPostgres();
-    return res.json(orders);
-  } catch (error) {
-    console.error("Error leyendo pedidos desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo pedidos desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.get("/orders/restaurant/:email", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-
-  try {
-    const orders = await getOrdersFromPostgres({ restaurantEmail: email });
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      total: orders.length,
-      orders
-    });
-  } catch (error) {
-    console.error("Error leyendo pedidos del restaurante desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo pedidos del restaurante desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.get("/orders/customer/:email", async (req, res) => {
-  const email = normalizeEmail(req.params.email);
-
-  try {
-    const orders = await getOrdersFromPostgres({ customerEmail: email });
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      total: orders.length,
-      orders
-    });
-  } catch (error) {
-    console.error("Error leyendo pedidos del cliente desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo pedidos del cliente desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.patch("/orders/:id/status", async (req, res) => {
-  const orderId = String(req.params.id || "").trim();
-  const normalizedStatus = normalizeOrderStatus(req.body?.status);
-
-  const validStatuses = [
-    "pendiente",
-    "aceptado",
-    "preparando",
-    "listo",
-    "en_camino",
-    "entregado"
-  ];
-
-  if (!validStatuses.includes(normalizedStatus)) {
-    return res.status(400).json({
-      ok: false,
-      message: "Estado inválido"
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE orders
-      SET status = $1, updated_at = NOW()
-      WHERE id = $2
-      RETURNING *
-      `,
-      [normalizedStatus, orderId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({
-        ok: false,
-        message: "Pedido no encontrado"
-      });
-    }
-
-    const order = await getOrderByIdFromPostgres(orderId);
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Estado actualizado correctamente",
-      order
-    });
-  } catch (error) {
-    console.error("Error actualizando estado del pedido en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando estado del pedido en PostgreSQL",
-      error: error.message
-    });
-  }
-});
+app.use("/restaurants", crearRutasRestaurantes({
+  normalizeEmail,
+  getRestaurantsFromPostgres,
+  getRestaurantByEmailFromPostgres
+}));
 
 
 /* ======================================================
-   ADMIN LOGIN - SOLO POSTGRESQL
+   RUTAS PLATOS MODULARIZADAS
+   - GET /restaurants/:email/dishes
+   - POST /restaurants/:email/dishes
+   - PUT /restaurants/:email/dishes/:dishId
+   - DELETE /restaurants/:email/dishes/:dishId
+   - La lógica fue movida a routes/platos.routes.js
 ====================================================== */
-app.post("/admin/login", async (req, res) => {
-  const { email, password } = req.body || {};
-
-  if (!email || !password) {
-    return res.status(400).json({
-      ok: false,
-      message: "Faltan credenciales"
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM admins
-      WHERE LOWER(email) = LOWER($1)
-      LIMIT 1
-      `,
-      [normalizeEmail(email)]
-    );
-
-    const adminRow = result.rows[0];
-
-    if (!adminRow || String(adminRow.password) !== String(password)) {
-      return res.status(401).json({
-        ok: false,
-        message: "Credenciales inválidas"
-      });
-    }
-
-    const admin = {
-      id: adminRow.id || "",
-      name: adminRow.name || "Administrador",
-      email: normalizeEmail(adminRow.email),
-      password: adminRow.password || "",
-      role: adminRow.role || "admin",
-      status: adminRow.status || "active"
-    };
-
-    const sessionToken = createSession(res, { ...admin, role: "admin" }, "admin");
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Login admin correcto",
-      admin,
-      sessionToken
-    });
-  } catch (error) {
-    console.error("Error login admin PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error login admin PostgreSQL",
-      error: error.message
-    });
-  }
-});
+app.use("/restaurants/:email/dishes", crearRutasPlatos({
+  normalizeEmail,
+  getDishesByRestaurantEmailFromPostgres,
+  getRestaurantByEmailFromPostgres,
+  createDishInPostgres,
+  updateDishInPostgres,
+  deleteDishFromPostgres
+}));
 
 /* ======================================================
-   ADMIN DATOS - TODO DESDE POSTGRESQL
-   - Usuarios, restaurantes y pedidos ya salen desde PostgreSQL.
-   - Mantiene la misma estructura data.users/data.restaurants/data.orders.
+   RUTAS PEDIDOS MODULARIZADAS
+   - POST /orders
+   - GET /orders
+   - GET /orders/restaurant/:email
+   - GET /orders/customer/:email
+   - PATCH /orders/:id/status
+   - La lógica fue movida a routes/pedidos.routes.js
 ====================================================== */
-app.get("/admin/datos", async (req, res) => {
-  try {
-    const users = await getUsersFromPostgres();
-    const restaurants = await getRestaurantsFromPostgres();
-    const orders = await getOrdersFromPostgres();
+app.use("/orders", crearRutasPedidos({
+  pool,
+  normalizeEmail,
+  normalizeOrderStatus,
+  createOrderInPostgres,
+  getOrdersFromPostgres,
+  getOrderByIdFromPostgres
+}));
 
-    return res.json({
-      ok: true,
-      source: "postgres",
-      data: {
-        users,
-        restaurants,
-        orders
-      }
-    });
-  } catch (error) {
-    console.error("Error leyendo datos admin desde PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error leyendo datos admin desde PostgreSQL",
-      error: error.message
-    });
-  }
-});
 
 /* ======================================================
-   ADMIN RESTAURANTES - CAMBIAR ESTADO - SOLO POSTGRESQL
+   RUTAS ADMIN MODULARIZADAS
+   - POST /admin/login
+   - GET /admin/datos
+   - PATCH /admin/restaurantes/:id/estado
+   - PATCH /admin/users/:id
+   - PATCH /admin/restaurantes/:id
+   - DELETE /admin/restaurantes/:id
+   - PATCH /admin/restaurantes/:id/comision
+   - La lógica fue movida a routes/admin.routes.js
 ====================================================== */
-app.patch("/admin/restaurantes/:id/estado", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-  let status = String(req.body?.status || "").trim().toLowerCase();
-
-  if (status === "paused") status = "blocked";
-
-  const validStatuses = ["pending", "approved", "blocked"];
-
-  if (!restaurantId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de restaurante requerido"
-    });
-  }
-
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({
-      ok: false,
-      message: "Estado inválido"
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE restaurants
-      SET status = $1, updated_at = NOW()
-      WHERE id = $2 OR LOWER(email) = LOWER($2)
-      RETURNING *
-      `,
-      [status, restaurantId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Estado del restaurante actualizado correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    console.error("Error actualizando estado en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando estado en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   ADMIN USUARIOS - EDITAR USUARIO - SOLO POSTGRESQL
-====================================================== */
-app.patch("/admin/users/:id", async (req, res) => {
-  const userId = String(req.params.id || "").trim();
-  const body = req.body || {};
-  const newEmail = normalizeEmail(body.email || "");
-
-  if (!userId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de usuario requerido"
-    });
-  }
-
-  try {
-    const currentResult = await pool.query(
-      `SELECT * FROM users WHERE id = $1 OR LOWER(email) = LOWER($1) LIMIT 1`,
-      [userId]
-    );
-
-    const current = currentResult.rows[0];
-
-    if (!current) {
-      return res.status(404).json({
-        ok: false,
-        message: "Usuario no encontrado"
-      });
-    }
-
-    const finalEmail = newEmail || normalizeEmail(current.email);
-
-    const exists = await pool.query(
-      `
-      SELECT email FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2
-      UNION
-      SELECT email FROM restaurants WHERE LOWER(email) = LOWER($1)
-      LIMIT 1
-      `,
-      [finalEmail, current.id]
-    );
-
-    if (exists.rows.length) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const updated = await pool.query(
-      `
-      UPDATE users
-      SET
-        full_name = $1,
-        name = $2,
-        email = $3,
-        phone = $4,
-        address = $5,
-        reference = $6,
-        latitude = $7,
-        longitude = $8,
-        password = $9,
-        updated_at = NOW()
-      WHERE id = $10
-      RETURNING *
-      `,
-      [
-        body.fullName != null ? normalizeText(body.fullName) : (current.full_name || current.name || ""),
-        body.fullName != null ? normalizeText(body.fullName) : (current.name || current.full_name || ""),
-        finalEmail,
-        body.phone != null ? normalizeText(body.phone) : (current.phone || ""),
-        body.address != null ? normalizeText(body.address) : (current.address || ""),
-        body.reference != null ? normalizeText(body.reference) : (current.reference || ""),
-        body.location?.lat ?? current.latitude ?? "",
-        body.location?.lng ?? current.longitude ?? "",
-        body.password != null && String(body.password).trim() ? String(body.password) : (current.password || ""),
-        current.id
-      ]
-    );
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Usuario actualizado correctamente",
-      user: mapDbUser(updated.rows[0])
-    });
-  } catch (error) {
-    console.error("Error actualizando usuario en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando usuario en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   ADMIN RESTAURANTES - EDITAR RESTAURANTE - SOLO POSTGRESQL
-====================================================== */
-app.patch("/admin/restaurantes/:id", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-  const body = req.body || {};
-
-  if (!restaurantId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de restaurante requerido"
-    });
-  }
-
-  try {
-    const currentResult = await pool.query(
-      `SELECT * FROM restaurants WHERE id = $1 OR LOWER(email) = LOWER($1) LIMIT 1`,
-      [restaurantId]
-    );
-
-    const current = currentResult.rows[0];
-
-    if (!current) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    const finalEmail = normalizeEmail(body.email ?? current.email);
-    let status = String(body.status ?? current.status ?? "pending").trim().toLowerCase();
-    if (status === "paused") status = "blocked";
-
-    const validStatuses = ["pending", "approved", "blocked"];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        ok: false,
-        message: "Estado inválido"
-      });
-    }
-
-    const exists = await pool.query(
-      `
-      SELECT email FROM restaurants WHERE LOWER(email) = LOWER($1) AND id <> $2
-      UNION
-      SELECT email FROM users WHERE LOWER(email) = LOWER($1)
-      LIMIT 1
-      `,
-      [finalEmail, current.id]
-    );
-
-    if (exists.rows.length) {
-      return res.status(409).json({
-        ok: false,
-        message: "Ese correo ya está registrado"
-      });
-    }
-
-    const commissionPercent = Number(
-      body.commissionPercent ??
-      body.commission ??
-      current.commission_percent ??
-      current.commission ??
-      15
-    );
-
-    if (Number.isNaN(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
-      return res.status(400).json({
-        ok: false,
-        message: "La comisión debe estar entre 0 y 100"
-      });
-    }
-
-    const updated = await pool.query(
-      `
-      UPDATE restaurants
-      SET
-        name = $1,
-        email = $2,
-        phone = $3,
-        address = $4,
-        category = $5,
-        description = $6,
-        status = $7,
-        commission = $8,
-        commission_percent = $8,
-        password = $9,
-        updated_at = NOW()
-      WHERE id = $10
-      RETURNING *
-      `,
-      [
-        body.name != null ? normalizeText(body.name) : current.name,
-        finalEmail,
-        body.phone != null ? normalizeText(body.phone) : (current.phone || ""),
-        body.address != null ? normalizeText(body.address) : (current.address || ""),
-        body.category != null ? normalizeText(body.category) : (current.category || ""),
-        body.description != null ? normalizeText(body.description) : (current.description || ""),
-        status,
-        commissionPercent,
-        body.password != null && String(body.password).trim() ? String(body.password) : (current.password || ""),
-        current.id
-      ]
-    );
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Restaurante actualizado correctamente",
-      restaurant: mapDbRestaurant(updated.rows[0])
-    });
-  } catch (error) {
-    console.error("Error actualizando restaurante en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando restaurante en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   ADMIN RESTAURANTES - ELIMINAR RESTAURANTE - SOLO POSTGRESQL
-====================================================== */
-app.delete("/admin/restaurantes/:id", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-
-  if (!restaurantId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de restaurante requerido"
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      DELETE FROM restaurants
-      WHERE id = $1 OR LOWER(email) = LOWER($1)
-      RETURNING *
-      `,
-      [restaurantId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Restaurante eliminado correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    console.error("Error eliminando restaurante en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error eliminando restaurante en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   ADMIN RESTAURANTES - CAMBIAR COMISIÓN - SOLO POSTGRESQL
-====================================================== */
-app.patch("/admin/restaurantes/:id/comision", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-  const commissionPercent = Number(req.body?.commissionPercent ?? req.body?.commission ?? 15);
-
-  if (!restaurantId) {
-    return res.status(400).json({
-      ok: false,
-      message: "ID de restaurante requerido"
-    });
-  }
-
-  if (Number.isNaN(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
-    return res.status(400).json({
-      ok: false,
-      message: "La comisión debe estar entre 0 y 100"
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE restaurants
-      SET commission = $1, commission_percent = $1, updated_at = NOW()
-      WHERE id = $2 OR LOWER(email) = LOWER($2)
-      RETURNING *
-      `,
-      [commissionPercent, restaurantId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({
-        ok: false,
-        message: "Restaurante no encontrado"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Comisión actualizada correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    console.error("Error actualizando comisión en PostgreSQL:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando comisión en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-/* ======================================================
-   ADMIN RESTAURANTES - RUTAS COMPATIBLES
-====================================================== */
-app.patch("/admin/restaurants/:id/status", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-  let status = String(req.body?.status || "").trim().toLowerCase();
-
-  if (status === "paused") status = "blocked";
-
-  const validStatuses = ["pending", "approved", "blocked"];
-
-  if (!restaurantId) {
-    return res.status(400).json({ ok: false, message: "ID de restaurante requerido" });
-  }
-
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({ ok: false, message: "Estado inválido" });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE restaurants
-      SET status = $1, updated_at = NOW()
-      WHERE id = $2 OR LOWER(email) = LOWER($2)
-      RETURNING *
-      `,
-      [status, restaurantId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({ ok: false, message: "Restaurante no encontrado" });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Estado del restaurante actualizado correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    return res.status(500).json({
-      ok: false,
-      message: "Error actualizando estado en PostgreSQL",
-      error: error.message
-    });
-  }
-});
-
-app.delete("/admin/restaurants/:id", async (req, res) => {
-  const restaurantId = String(req.params.id || "").trim();
-
-  if (!restaurantId) {
-    return res.status(400).json({ ok: false, message: "ID de restaurante requerido" });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      DELETE FROM restaurants
-      WHERE id = $1 OR LOWER(email) = LOWER($1)
-      RETURNING *
-      `,
-      [restaurantId]
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({ ok: false, message: "Restaurante no encontrado" });
-    }
-
-    return res.json({
-      ok: true,
-      source: "postgres",
-      message: "Restaurante eliminado correctamente",
-      restaurant: mapDbRestaurant(result.rows[0])
-    });
-  } catch (error) {
-    return res.status(500).json({
-      ok: false,
-      message: "Error eliminando restaurante en PostgreSQL",
-      error: error.message
-    });
-  }
-});
+app.use("/admin", crearRutasAdmin({
+  pool,
+  normalizeEmail,
+  normalizeText,
+  createSession,
+  getUsersFromPostgres,
+  getRestaurantsFromPostgres,
+  getOrdersFromPostgres,
+  mapDbUser,
+  mapDbRestaurant
+}));
 
 /* ======================================================
    ESTADÍSTICAS PÚBLICAS DEL INDEX
@@ -2832,6 +1703,384 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
