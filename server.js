@@ -4,37 +4,18 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
-const { Pool } = require("pg");
 require("dotenv").config();
+const { pool } = require("./db/postgres");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 /* ======================================================
    POSTGRESQL / SUPABASE
-   - Conexión inicial segura.
-   - Por ahora NO reemplaza JSON.
-   - Solo permite probar conexión con /db-test.
-   - DATABASE_URL debe estar configurada en Render.
+   - La conexión ahora está separada en db/postgres.js.
+   - server.js solo importa pool para usarlo en rutas, migración y consultas.
+   - No se cambian rutas ni lógica de negocio en este paso.
 ====================================================== */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
-
-pool.connect()
-  .then((client) => {
-    console.log("=================================");
-    console.log("✅ PostgreSQL conectado correctamente");
-    console.log("=================================");
-    client.release();
-  })
-  .catch((error) => {
-    console.error("❌ Error conectando PostgreSQL:", error.message);
-  });
-
 const ORDERS_FILE = path.join(__dirname, "orders.json");
 const USERS_FILE = path.join(__dirname, "users.json");
 const RESTAURANTS_FILE = path.join(__dirname, "restaurants.json");
@@ -2851,6 +2832,48 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
