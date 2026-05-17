@@ -22,6 +22,7 @@ const crearRutasAuth = require("./routes/auth.routes");
 const crearRutasPedidos = require("./routes/pedidos.routes");
 const crearRutasPlatos = require("./routes/platos.routes");
 const crearRutasAdmin = require("./routes/admin.routes");
+const crearRutasDirecciones = require("./routes/direcciones.routes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -1290,6 +1291,21 @@ app.use("/", crearRutasAuth({
 }));
 
 /* ======================================================
+   RUTAS DIRECCIONES DE USUARIO - BHUZ
+   - GET /users/:email/addresses
+   - POST /users/:email/addresses
+   - PUT /users/:email/addresses/:addressId/default
+   - DELETE /users/:email/addresses/:addressId
+   - Dirección escrita + referencia + GPS obligatorio.
+====================================================== */
+app.use("/users/:email/addresses", crearRutasDirecciones({
+  pool,
+  normalizeEmail,
+  normalizeText,
+  generateId
+}));
+
+/* ======================================================
    RUTAS USUARIOS MODULARIZADAS
    - GET /users
    - GET /users/:email
@@ -1703,6 +1719,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 

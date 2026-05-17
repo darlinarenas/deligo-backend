@@ -2,9 +2,9 @@ const express = require("express");
 
 /* ======================================================
    RUTAS AUTH / SESIÓN
-   - Este archivo separa login, registro y sesión.
-   - Mantiene las mismas rutas públicas que ya usa el frontend.
-   - No cambia platos, pedidos, admin ni estadísticas.
+   - Registro cliente con GPS obligatorio.
+   - Guarda dirección principal automáticamente.
+   - Compatible con PostgreSQL + user_addresses.
 ====================================================== */
 
 function crearRutasAuth(dependencias) {
@@ -26,7 +26,6 @@ function crearRutasAuth(dependencias) {
 
   /* ======================================================
      GET /session
-     Verifica sesión activa.
   ====================================================== */
   router.get("/session", async (req, res) => {
     const session = await getSessionUser(req);
@@ -48,7 +47,6 @@ function crearRutasAuth(dependencias) {
 
   /* ======================================================
      POST /logout
-     Cierra sesión.
   ====================================================== */
   router.post("/logout", (req, res) => {
     clearSession(req, res);
@@ -61,7 +59,7 @@ function crearRutasAuth(dependencias) {
 
   /* ======================================================
      POST /register
-     Registro de cliente.
+     REGISTRO CLIENTE CON GPS OBLIGATORIO
   ====================================================== */
   router.post("/register", async (req, res) => {
     const {
@@ -74,17 +72,34 @@ function crearRutasAuth(dependencias) {
       location
     } = req.body || {};
 
-    if (!fullName || !address || !phone || !email || !password) {
+    const latitude = String(location?.lat || "").trim();
+    const longitude = String(location?.lng || "").trim();
+
+    if (
+      !fullName ||
+      !address ||
+      !phone ||
+      !email ||
+      !password ||
+      !reference ||
+      !latitude ||
+      !longitude
+    ) {
       return res.status(400).json({
         ok: false,
-        message: "Faltan campos obligatorios"
+        message:
+          "Nombre, dirección, referencia y ubicación GPS son obligatorios"
       });
     }
 
     const normalizedEmail = normalizeEmail(email);
 
+    const client = await pool.connect();
+
     try {
-      const exists = await pool.query(
+      await client.query("BEGIN");
+
+      const exists = await client.query(
         `
         SELECT email FROM users WHERE LOWER(email) = LOWER($1)
         UNION
@@ -95,6 +110,8 @@ function crearRutasAuth(dependencias) {
       );
 
       if (exists.rows.length) {
+        await client.query("ROLLBACK");
+
         return res.status(409).json({
           ok: false,
           message: "Ese correo ya está registrado"
@@ -112,20 +129,32 @@ function crearRutasAuth(dependencias) {
         role: "customer",
         status: "active",
         reference: normalizeText(reference),
-        location: {
-          lat: location?.lat || "",
-          lng: location?.lng || ""
-        },
+        latitude,
+        longitude,
         createdAt: new Date().toISOString()
       };
 
-      const result = await pool.query(
+      const result = await client.query(
         `
         INSERT INTO users (
-          id, full_name, name, email, password, phone, address, reference,
-          role, status, latitude, longitude, created_at, updated_at
+          id,
+          full_name,
+          name,
+          email,
+          password,
+          phone,
+          address,
+          reference,
+          role,
+          status,
+          latitude,
+          longitude,
+          created_at,
+          updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW()
+        )
         RETURNING *
         `,
         [
@@ -139,10 +168,42 @@ function crearRutasAuth(dependencias) {
           newUser.reference,
           newUser.role,
           newUser.status,
-          newUser.location.lat,
-          newUser.location.lng
+          newUser.latitude,
+          newUser.longitude
         ]
       );
+
+      await client.query(
+        `
+        INSERT INTO user_addresses (
+          id,
+          user_email,
+          label,
+          address,
+          reference,
+          latitude,
+          longitude,
+          is_default,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW()
+        )
+        `,
+        [
+          generateId("address"),
+          normalizedEmail,
+          "Casa",
+          newUser.address,
+          newUser.reference,
+          newUser.latitude,
+          newUser.longitude,
+          true
+        ]
+      );
+
+      await client.query("COMMIT");
 
       return res.status(201).json({
         ok: true,
@@ -151,19 +212,25 @@ function crearRutasAuth(dependencias) {
         user: mapDbUser(result.rows[0])
       });
     } catch (error) {
-      console.error("Error registrando usuario en PostgreSQL:", error.message);
+      await client.query("ROLLBACK");
+
+      console.error(
+        "Error registrando usuario en PostgreSQL:",
+        error.message
+      );
 
       return res.status(500).json({
         ok: false,
         message: "Error registrando usuario en PostgreSQL",
         error: error.message
       });
+    } finally {
+      client.release();
     }
   });
 
   /* ======================================================
      POST /register-restaurant
-     Registro de restaurante.
   ====================================================== */
   router.post("/register-restaurant", async (req, res) => {
     const { name, address, phone, email, password } = req.body || {};
@@ -198,10 +265,23 @@ function crearRutasAuth(dependencias) {
       const result = await pool.query(
         `
         INSERT INTO restaurants (
-          id, name, email, password, phone, address, role, status,
-          commission, commission_percent, open, created_at, updated_at
+          id,
+          name,
+          email,
+          password,
+          phone,
+          address,
+          role,
+          status,
+          commission,
+          commission_percent,
+          open,
+          created_at,
+          updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+        VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW()
+        )
         RETURNING *
         `,
         [
@@ -226,7 +306,10 @@ function crearRutasAuth(dependencias) {
         restaurant: mapDbRestaurant(result.rows[0])
       });
     } catch (error) {
-      console.error("Error registrando restaurante en PostgreSQL:", error.message);
+      console.error(
+        "Error registrando restaurante en PostgreSQL:",
+        error.message
+      );
 
       return res.status(500).json({
         ok: false,
@@ -238,7 +321,6 @@ function crearRutasAuth(dependencias) {
 
   /* ======================================================
      POST /login
-     Login cliente / restaurante.
   ====================================================== */
   router.post("/login", async (req, res) => {
     const { role, email, password } = req.body || {};
@@ -254,27 +336,41 @@ function crearRutasAuth(dependencias) {
     const normalizedRole = String(role || "").trim().toLowerCase();
 
     try {
-      if (normalizedRole === "restaurant" || normalizedRole === "restaurante") {
-        const restaurant = await getRestaurantByEmailFromPostgres(normalizedEmail);
+      if (
+        normalizedRole === "restaurant" ||
+        normalizedRole === "restaurante"
+      ) {
+        const restaurant =
+          await getRestaurantByEmailFromPostgres(normalizedEmail);
 
-        if (!restaurant || String(restaurant.password) !== String(password)) {
+        if (
+          !restaurant ||
+          String(restaurant.password) !== String(password)
+        ) {
           return res.status(401).json({
             ok: false,
             message: "Datos inválidos para restaurante"
           });
         }
 
-        if (restaurant.status && restaurant.status !== "approved") {
+        if (
+          restaurant.status &&
+          restaurant.status !== "approved"
+        ) {
           return res.status(403).json({
             ok: false,
             message:
               restaurant.status === "blocked"
-                ? "Tu restaurante está bloqueado. Contacta con DELI GO."
+                ? "Tu restaurante está bloqueado. Contacta con BHUZ."
                 : "Tu restaurante está pendiente de aprobación administrativa."
           });
         }
 
-        const sessionUser = { ...restaurant, role: "restaurant" };
+        const sessionUser = {
+          ...restaurant,
+          role: "restaurant"
+        };
+
         createSession(res, sessionUser, "user");
 
         return res.json({
@@ -285,7 +381,8 @@ function crearRutasAuth(dependencias) {
         });
       }
 
-      const user = await getUserByEmailFromPostgres(normalizedEmail);
+      const user =
+        await getUserByEmailFromPostgres(normalizedEmail);
 
       if (!user || String(user.password) !== String(password)) {
         return res.status(401).json({
@@ -294,7 +391,11 @@ function crearRutasAuth(dependencias) {
         });
       }
 
-      const sessionUser = { ...user, role: "customer" };
+      const sessionUser = {
+        ...user,
+        role: "customer"
+      };
+
       createSession(res, sessionUser, "user");
 
       return res.json({
@@ -318,3 +419,4 @@ function crearRutasAuth(dependencias) {
 }
 
 module.exports = crearRutasAuth;
+
