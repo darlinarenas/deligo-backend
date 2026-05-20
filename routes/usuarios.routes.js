@@ -1,57 +1,54 @@
 const express = require("express");
 
-const express = require("express");
-
 /* ======================================================
    RUTAS USUARIOS
-   - Este archivo separa SOLO las rutas de usuarios.
-   - Mantiene las mismas respuestas que ya usa el frontend.
+   - Lee usuarios desde PostgreSQL.
+   - Permite actualizar datos del perfil del cliente.
+   - El correo NO se edita porque es la llave principal del usuario.
+   - Permite cambiar contraseña validando contraseña actual.
    - No cambia login, registro, admin, pedidos ni restaurantes.
-   - CAMBIO BHUZ: agrega actualización segura de perfil y contraseña.
 ====================================================== */
+
+let fallbackPool = null;
+
+try {
+  fallbackPool = require("../db/postgres").pool;
+} catch (error) {
+  fallbackPool = null;
+}
 
 function crearRutasUsuarios(dependencias) {
   const router = express.Router();
 
   const {
-    pool,
     normalizeEmail,
-    normalizeText,
     getUsersFromPostgres,
-    getUserByEmailFromPostgres,
-    createSession
+    getUserByEmailFromPostgres
   } = dependencias;
 
+  const pool = dependencias.pool || fallbackPool;
+  const normalizeText = dependencias.normalizeText || ((value) => String(value || "").trim());
+  const mapDbUser = dependencias.mapDbUser || ((row) => ({
+    id: row.id || "",
+    fullName: row.full_name || row.name || "",
+    name: row.name || row.full_name || "",
+    address: row.address || "",
+    phone: row.phone || "",
+    email: normalizeEmail(row.email),
+    password: row.password || "",
+    role: row.role || "customer",
+    status: row.status || "active",
+    reference: row.reference || "",
+    location: {
+      lat: row.latitude || "",
+      lng: row.longitude || ""
+    },
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : "",
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : ""
+  }));
+
   function cleanText(value) {
-    const raw = String(value || "").trim();
-
-    if (!raw) return "";
-
-    if (typeof normalizeText === "function") {
-      return normalizeText(raw);
-    }
-
-    return raw;
-  }
-
-  function mapUpdatedUser(row) {
-    if (!row) return null;
-
-    return {
-      id: row.id,
-      fullName: row.full_name || row.name || "",
-      name: row.name || row.full_name || "",
-      email: row.email || "",
-      phone: row.phone || "",
-      address: row.address || "",
-      reference: row.reference || "",
-      latitude: row.latitude || "",
-      longitude: row.longitude || "",
-      role: row.role || "customer",
-      status: row.status || "active",
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
+    return String(value || "").trim();
   }
 
   /* ======================================================
@@ -114,18 +111,19 @@ function crearRutasUsuarios(dependencias) {
 
   /* ======================================================
      PUT /users/:email
-     Actualiza datos personales del usuario.
+     Actualiza perfil del usuario.
 
-     Permite:
+     PERMITIDO:
      - nombre completo
      - teléfono
-     - contraseña
+     - contraseña, solo con contraseña actual válida
 
-     Reglas:
-     - El correo NO se cambia porque conecta users, user_addresses y orders.
-     - Para cambiar contraseña exige contraseña actual.
-     - Mantiene PostgreSQL como fuente real.
-     - Refresca la sesión si server.js entrega createSession.
+     BLOQUEADO:
+     - correo electrónico
+
+     NOTA:
+     - La dirección completa se edita en /users/:email/addresses/:addressId
+       porque el sistema usa user_addresses como fuente real de direcciones.
   ====================================================== */
   router.put("/:email", async (req, res) => {
     const email = normalizeEmail(req.params.email);
@@ -140,51 +138,34 @@ function crearRutasUsuarios(dependencias) {
 
     const finalName = cleanText(fullName || name);
     const finalPhone = cleanText(phone);
-    const wantsPasswordChange = Boolean(
-      String(currentPassword || "").trim() || String(newPassword || "").trim()
-    );
-
-    if (!email) {
-      return res.status(400).json({
-        ok: false,
-        message: "Correo inválido"
-      });
-    }
-
-    if (!finalName) {
-      return res.status(400).json({
-        ok: false,
-        message: "El nombre no puede quedar vacío"
-      });
-    }
-
-    if (!finalPhone) {
-      return res.status(400).json({
-        ok: false,
-        message: "El teléfono no puede quedar vacío"
-      });
-    }
-
-    if (wantsPasswordChange) {
-      if (!String(currentPassword || "")) {
-        return res.status(400).json({
-          ok: false,
-          message: "Escribe tu contraseña actual para cambiarla"
-        });
-      }
-
-      if (!String(newPassword || "") || String(newPassword).length < 6) {
-        return res.status(400).json({
-          ok: false,
-          message: "La nueva contraseña debe tener mínimo 6 caracteres"
-        });
-      }
-    }
+    const finalCurrentPassword = String(currentPassword || "");
+    const finalNewPassword = String(newPassword || "");
 
     if (!pool) {
       return res.status(500).json({
         ok: false,
-        message: "No se recibió conexión PostgreSQL para actualizar usuario"
+        message: "No hay conexión disponible con PostgreSQL para actualizar el perfil"
+      });
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        message: "Correo de usuario inválido"
+      });
+    }
+
+    if (!finalName || !finalPhone) {
+      return res.status(400).json({
+        ok: false,
+        message: "Nombre y teléfono son obligatorios"
+      });
+    }
+
+    if (finalNewPassword && finalNewPassword.length < 6) {
+      return res.status(400).json({
+        ok: false,
+        message: "La nueva contraseña debe tener mínimo 6 caracteres"
       });
     }
 
@@ -193,7 +174,7 @@ function crearRutasUsuarios(dependencias) {
     try {
       await client.query("BEGIN");
 
-      const existing = await client.query(
+      const currentResult = await client.query(
         `
         SELECT *
         FROM users
@@ -203,7 +184,7 @@ function crearRutasUsuarios(dependencias) {
         [email]
       );
 
-      if (!existing.rows.length) {
+      if (!currentResult.rows.length) {
         await client.query("ROLLBACK");
 
         return res.status(404).json({
@@ -212,84 +193,63 @@ function crearRutasUsuarios(dependencias) {
         });
       }
 
-      const dbUser = existing.rows[0];
+      const currentUser = currentResult.rows[0];
 
-      if (wantsPasswordChange && String(dbUser.password) !== String(currentPassword)) {
-        await client.query("ROLLBACK");
+      if (finalNewPassword) {
+        if (!finalCurrentPassword) {
+          await client.query("ROLLBACK");
 
-        return res.status(401).json({
-          ok: false,
-          message: "La contraseña actual no es correcta"
-        });
+          return res.status(400).json({
+            ok: false,
+            message: "Debes escribir tu contraseña actual para cambiarla"
+          });
+        }
+
+        if (String(currentUser.password || "") !== String(finalCurrentPassword)) {
+          await client.query("ROLLBACK");
+
+          return res.status(401).json({
+            ok: false,
+            message: "La contraseña actual no es correcta"
+          });
+        }
       }
 
-      const updateResult = await client.query(
+      const updatedResult = await client.query(
         `
         UPDATE users
-        SET
-          full_name = $1,
-          name = $2,
-          phone = $3,
-          password = CASE WHEN $4::boolean THEN $5 ELSE password END,
-          updated_at = NOW()
-        WHERE LOWER(email) = LOWER($6)
+        SET full_name = $1,
+            name = $1,
+            phone = $2,
+            password = CASE WHEN $3 = '' THEN password ELSE $3 END,
+            updated_at = NOW()
+        WHERE LOWER(email) = LOWER($4)
         RETURNING *
         `,
         [
-          finalName,
-          finalName,
-          finalPhone,
-          wantsPasswordChange,
-          wantsPasswordChange ? String(newPassword) : null,
+          normalizeText(finalName),
+          normalizeText(finalPhone),
+          finalNewPassword,
           email
         ]
       );
 
       await client.query("COMMIT");
 
-      let user = null;
-
-      try {
-        user = await getUserByEmailFromPostgres(email);
-      } catch (mapError) {
-        user = mapUpdatedUser(updateResult.rows[0]);
-      }
-
-      if (!user) {
-        user = mapUpdatedUser(updateResult.rows[0]);
-      }
-
-      if (typeof createSession === "function") {
-        try {
-          createSession(
-            res,
-            {
-              ...user,
-              role: user.role || "customer"
-            },
-            "user"
-          );
-        } catch (sessionError) {
-          console.warn("Perfil actualizado, pero no se pudo refrescar sesión:", sessionError.message);
-        }
-      }
-
       return res.json({
         ok: true,
         source: "postgres",
-        message: wantsPasswordChange
-          ? "Perfil y contraseña actualizados correctamente"
-          : "Perfil actualizado correctamente",
-        user
+        message: "Perfil actualizado correctamente",
+        user: mapDbUser(updatedResult.rows[0])
       });
     } catch (error) {
       await client.query("ROLLBACK");
 
-      console.error("Error actualizando usuario desde PostgreSQL:", error.message);
+      console.error("Error actualizando perfil del usuario:", error.message);
 
       return res.status(500).json({
         ok: false,
-        message: "Error actualizando usuario desde PostgreSQL",
+        message: "Error actualizando perfil del usuario",
         error: error.message
       });
     } finally {
@@ -301,4 +261,5 @@ function crearRutasUsuarios(dependencias) {
 }
 
 module.exports = crearRutasUsuarios;
+
 

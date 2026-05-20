@@ -259,6 +259,160 @@ function crearRutasDirecciones(dependencias) {
     }
   });
 
+
+  /* ======================================================
+     PUT /users/:email/addresses/:addressId
+     Edita una dirección guardada existente.
+     - Permite cambiar alias, dirección, referencia y GPS.
+     - Si queda como principal, también actualiza users.
+     - Evita el reemplazo inseguro de crear y borrar cuando solo hay una dirección.
+  ====================================================== */
+  router.put("/:addressId", async (req, res) => {
+    const email = normalizeEmail(req.params.email);
+    const addressId = String(req.params.addressId || "").trim();
+
+    const {
+      label,
+      address,
+      reference,
+      latitude,
+      longitude,
+      location,
+      isDefault
+    } = req.body || {};
+
+    const finalLabel = normalizeText(label || "Casa");
+    const finalAddress = normalizeText(address);
+    const finalReference = normalizeText(reference);
+    const finalLatitude = String(latitude || location?.lat || "").trim();
+    const finalLongitude = String(longitude || location?.lng || "").trim();
+    const shouldBeDefault = normalizeBoolean(isDefault);
+
+    if (!email || !addressId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Datos inválidos para editar dirección"
+      });
+    }
+
+    if (!finalAddress || !finalReference || !finalLatitude || !finalLongitude) {
+      return res.status(400).json({
+        ok: false,
+        message: "Dirección, referencia y ubicación GPS son obligatorias"
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const addressResult = await client.query(
+        `
+        SELECT *
+        FROM user_addresses
+        WHERE id = $1
+          AND LOWER(user_email) = LOWER($2)
+        LIMIT 1
+        `,
+        [addressId, email]
+      );
+
+      if (!addressResult.rows.length) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          ok: false,
+          message: "Dirección no encontrada"
+        });
+      }
+
+      const previousAddress = addressResult.rows[0];
+      const finalDefault = shouldBeDefault || Boolean(previousAddress.is_default);
+
+      if (finalDefault) {
+        await client.query(
+          `
+          UPDATE user_addresses
+          SET is_default = false, updated_at = NOW()
+          WHERE LOWER(user_email) = LOWER($1)
+          `,
+          [email]
+        );
+      }
+
+      const updatedResult = await client.query(
+        `
+        UPDATE user_addresses
+        SET label = $1,
+            address = $2,
+            reference = $3,
+            latitude = $4,
+            longitude = $5,
+            is_default = $6,
+            updated_at = NOW()
+        WHERE id = $7
+          AND LOWER(user_email) = LOWER($8)
+        RETURNING *
+        `,
+        [
+          finalLabel || "Casa",
+          finalAddress,
+          finalReference,
+          finalLatitude,
+          finalLongitude,
+          finalDefault,
+          addressId,
+          email
+        ]
+      );
+
+      const updatedAddress = updatedResult.rows[0];
+
+      if (finalDefault) {
+        await client.query(
+          `
+          UPDATE users
+          SET address = $1,
+              reference = $2,
+              latitude = $3,
+              longitude = $4,
+              updated_at = NOW()
+          WHERE LOWER(email) = LOWER($5)
+          `,
+          [
+            updatedAddress.address,
+            updatedAddress.reference,
+            updatedAddress.latitude,
+            updatedAddress.longitude,
+            email
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        message: "Dirección actualizada correctamente",
+        address: mapDbAddress(updatedAddress)
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+
+      console.error("Error actualizando dirección del usuario:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error actualizando dirección del usuario",
+        error: error.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   /* ======================================================
      PUT /users/:email/addresses/:addressId/default
      Marca una dirección como predeterminada.
@@ -491,3 +645,4 @@ function crearRutasDirecciones(dependencias) {
 }
 
 module.exports = crearRutasDirecciones;
+
