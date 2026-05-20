@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 require("dotenv").config();
 
 const { pool } = require("./db/postgres");
@@ -150,6 +151,29 @@ async function initDatabaseTables() {
         quantity NUMERIC DEFAULT 1,
         subtotal NUMERIC DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS delivery_invites (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        invite_token TEXT UNIQUE NOT NULL,
+        sender_name TEXT,
+        sender_email TEXT,
+        recipient_name TEXT NOT NULL,
+        recipient_phone TEXT,
+        invite_message TEXT,
+        invite_status TEXT DEFAULT 'pending_location',
+        share_url TEXT,
+        recipient_address TEXT,
+        recipient_reference TEXT,
+        recipient_latitude TEXT,
+        recipient_longitude TEXT,
+        confirmed_at TIMESTAMPTZ,
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
 
@@ -1349,6 +1373,368 @@ app.use("/restaurants/:email/dishes", crearRutasPlatos({
   deleteDishFromPostgres
 }));
 
+
+/* ======================================================
+   BHUZ - INVITAR COMIDA
+   - Link público para que el receptor comparta GPS.
+   - No reemplaza el pedido normal.
+   - PostgreSQL es la fuente real.
+====================================================== */
+
+function generateInviteToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function normalizeFrontendBaseUrl(value, req) {
+  const fallbackOrigin = req.get("origin") || "";
+  const raw = String(value || fallbackOrigin || "").trim();
+
+  if (!raw) return "";
+
+  try {
+    const url = new URL(raw);
+    return url.toString().endsWith("/") ? url.toString() : `${url.toString()}/`;
+  } catch {
+    return raw.endsWith("/") ? raw : `${raw}/`;
+  }
+}
+
+function buildInviteUrl(baseUrl, token) {
+  const cleanBase = String(baseUrl || "").trim();
+
+  if (!cleanBase) {
+    return `/invite.html?token=${encodeURIComponent(token)}`;
+  }
+
+  return `${cleanBase}invite.html?token=${encodeURIComponent(token)}`;
+}
+
+function mapDbDeliveryInvite(row) {
+  if (!row) return null;
+
+  return {
+    id: row.id || "",
+    orderId: row.order_id || "",
+    token: row.invite_token || "",
+    senderName: row.sender_name || "",
+    senderEmail: normalizeEmail(row.sender_email || ""),
+    recipientName: row.recipient_name || "",
+    recipientPhone: row.recipient_phone || "",
+    message: row.invite_message || "",
+    status: row.invite_status || "pending_location",
+    shareUrl: row.share_url || "",
+    recipientAddress: row.recipient_address || "",
+    recipientReference: row.recipient_reference || "",
+    recipientLatitude: row.recipient_latitude || "",
+    recipientLongitude: row.recipient_longitude || "",
+    confirmedAt: row.confirmed_at || null,
+    expiresAt: row.expires_at || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    location: {
+      lat: row.recipient_latitude || "",
+      lng: row.recipient_longitude || ""
+    }
+  };
+}
+
+app.post("/orders/:orderId/invite", async (req, res) => {
+  const orderId = String(req.params.orderId || "").trim();
+
+  const {
+    recipientName,
+    recipientPhone,
+    message,
+    senderName,
+    senderEmail,
+    frontendBaseUrl
+  } = req.body || {};
+
+  const finalRecipientName = toNullableText(recipientName);
+  const finalRecipientPhone = toNullableText(recipientPhone);
+  const finalMessage = toNullableText(message);
+  const finalSenderName = toNullableText(senderName);
+  const finalSenderEmail = normalizeEmail(senderEmail || "");
+
+  if (!orderId) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID de pedido inválido"
+    });
+  }
+
+  if (!finalRecipientName) {
+    return res.status(400).json({
+      ok: false,
+      message: "El nombre del receptor es obligatorio"
+    });
+  }
+
+  try {
+    const order = await getOrderByIdFromPostgres(orderId);
+
+    if (!order) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pedido no encontrado"
+      });
+    }
+
+    const existingResult = await pool.query(
+      `
+      SELECT *
+      FROM delivery_invites
+      WHERE order_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [orderId]
+    );
+
+    if (existingResult.rows.length) {
+      return res.status(200).json({
+        ok: true,
+        source: "postgres",
+        message: "Este pedido ya tiene un link de invitación",
+        invite: mapDbDeliveryInvite(existingResult.rows[0])
+      });
+    }
+
+    const token = generateInviteToken();
+    const baseUrl = normalizeFrontendBaseUrl(frontendBaseUrl, req);
+    const shareUrl = buildInviteUrl(baseUrl, token);
+
+    const result = await pool.query(
+      `
+      INSERT INTO delivery_invites (
+        id, order_id, invite_token, sender_name, sender_email,
+        recipient_name, recipient_phone, invite_message, invite_status,
+        share_url, expires_at, created_at, updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending_location',$9,NOW() + INTERVAL '24 hours',NOW(),NOW())
+      RETURNING *
+      `,
+      [
+        generateId("invite"),
+        orderId,
+        token,
+        finalSenderName,
+        finalSenderEmail || null,
+        finalRecipientName,
+        finalRecipientPhone,
+        finalMessage,
+        shareUrl
+      ]
+    );
+
+    return res.status(201).json({
+      ok: true,
+      source: "postgres",
+      message: "Link de invitación creado correctamente",
+      invite: mapDbDeliveryInvite(result.rows[0])
+    });
+  } catch (error) {
+    console.error("Error creando invitación de comida:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error creando invitación de comida",
+      error: error.message
+    });
+  }
+});
+
+app.get("/invite/:token", async (req, res) => {
+  const token = String(req.params.token || "").trim();
+
+  if (!token) {
+    return res.status(400).json({
+      ok: false,
+      message: "Token inválido"
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        di.*,
+        o.restaurant_name,
+        o.total,
+        o.status AS order_status
+      FROM delivery_invites di
+      INNER JOIN orders o ON o.id = di.order_id
+      WHERE di.invite_token = $1
+      LIMIT 1
+      `,
+      [token]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        ok: false,
+        message: "Invitación no encontrada"
+      });
+    }
+
+    const row = result.rows[0];
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      invite: mapDbDeliveryInvite(row),
+      order: {
+        id: row.order_id || "",
+        restaurantName: row.restaurant_name || "Restaurante",
+        total: Number(row.total || 0),
+        status: row.order_status || "pendiente"
+      }
+    });
+  } catch (error) {
+    console.error("Error leyendo invitación:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error leyendo invitación",
+      error: error.message
+    });
+  }
+});
+
+app.post("/invite/:token/location", async (req, res) => {
+  const token = String(req.params.token || "").trim();
+
+  const {
+    address,
+    reference,
+    latitude,
+    longitude,
+    location
+  } = req.body || {};
+
+  const finalAddress = toNullableText(address) || "Ubicación compartida por receptor invitado";
+  const finalReference = toNullableText(reference);
+  const finalLatitude = String(latitude || location?.lat || "").trim();
+  const finalLongitude = String(longitude || location?.lng || "").trim();
+
+  if (!token) {
+    return res.status(400).json({
+      ok: false,
+      message: "Token inválido"
+    });
+  }
+
+  if (!finalReference || !finalLatitude || !finalLongitude) {
+    return res.status(400).json({
+      ok: false,
+      message: "Referencia y ubicación GPS son obligatorias"
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const inviteResult = await client.query(
+      `
+      SELECT *
+      FROM delivery_invites
+      WHERE invite_token = $1
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [token]
+    );
+
+    if (!inviteResult.rows.length) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        ok: false,
+        message: "Invitación no encontrada"
+      });
+    }
+
+    const invite = inviteResult.rows[0];
+
+    if (invite.invite_status === "location_confirmed") {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        ok: false,
+        message: "Esta invitación ya tiene ubicación confirmada"
+      });
+    }
+
+    const updatedInviteResult = await client.query(
+      `
+      UPDATE delivery_invites
+      SET
+        invite_status = 'location_confirmed',
+        recipient_address = $1,
+        recipient_reference = $2,
+        recipient_latitude = $3,
+        recipient_longitude = $4,
+        confirmed_at = NOW(),
+        updated_at = NOW()
+      WHERE invite_token = $5
+      RETURNING *
+      `,
+      [
+        finalAddress,
+        finalReference,
+        finalLatitude,
+        finalLongitude,
+        token
+      ]
+    );
+
+    await client.query(
+      `
+      UPDATE orders
+      SET
+        delivery_address = $1,
+        delivery_reference = $2,
+        latitude = $3,
+        longitude = $4,
+        notes = COALESCE(NULLIF(notes, ''), 'Pedido invitado: ubicación confirmada por el receptor.'),
+        updated_at = NOW()
+      WHERE id = $5
+      `,
+      [
+        finalAddress,
+        finalReference,
+        finalLatitude,
+        finalLongitude,
+        invite.order_id
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      source: "postgres",
+      message: "Ubicación confirmada correctamente",
+      invite: mapDbDeliveryInvite(updatedInviteResult.rows[0]),
+      order: await getOrderByIdFromPostgres(invite.order_id)
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    console.error("Error confirmando ubicación de invitación:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error confirmando ubicación de invitación",
+      error: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
 /* ======================================================
    RUTAS PEDIDOS MODULARIZADAS
    - POST /orders
@@ -1719,6 +2105,932 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
