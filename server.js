@@ -2255,6 +2255,24 @@ app.get("/invite/:token", async (req, res) => {
     const pending = await getInvitacionPendienteByToken(token);
 
     if (pending) {
+      /* ======================================================
+         BHUZ - SEGUIMIENTO REAL PARA INVITADO
+         - Antes este endpoint devolvía el estado de invitaciones_pendientes.
+         - Cuando el pedido ya estaba creado, el invitado seguía viendo
+           "pedido_creado" o datos viejos y no el estado real de orders.
+         - Ahora, si la invitación pendiente ya tiene order_id, consultamos
+           la orden real en PostgreSQL y devolvemos su estado actualizado.
+      ====================================================== */
+      let linkedOrder = null;
+
+      if (pending.order_id) {
+        try {
+          linkedOrder = await getOrderByIdFromPostgres(pending.order_id);
+        } catch (orderError) {
+          console.warn("BHUZ: no se pudo cargar pedido real de invitación:", orderError.message);
+        }
+      }
+
       return res.json({
         ok: true,
         source: "postgres",
@@ -2262,10 +2280,10 @@ app.get("/invite/:token", async (req, res) => {
         invite: mapInvitacionPendienteComoInvite(pending),
         invitacion: mapDbInvitacionPendiente(pending),
         order: {
-          id: pending.order_id || "",
-          restaurantName: pending.restaurant_name || "Restaurante",
-          total: Number(pending.total || 0),
-          status: pending.invite_status || "pendiente"
+          id: linkedOrder?.id || pending.order_id || "",
+          restaurantName: linkedOrder?.restaurantName || linkedOrder?.restaurant_name || pending.restaurant_name || "Restaurante",
+          total: Number(linkedOrder?.total || pending.total || 0),
+          status: linkedOrder?.status || pending.invite_status || "pendiente"
         }
       });
     }
@@ -3004,4 +3022,5 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
