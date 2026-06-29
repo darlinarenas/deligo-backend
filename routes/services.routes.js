@@ -333,7 +333,7 @@ function crearRutasServices({ pool }) {
         tokenRow = tokenResult.rows[0];
       }
 
-      const baseUrl = buildFrontendBaseUrl(req.body?.frontendBaseUrl, req);
+      const baseUrl = buildFrontendBaseUrl(null, req);
       const shareUrl = buildReceiverConfirmUrl(baseUrl, tokenRow.token);
 
       await insertarHistorial(client, {
@@ -684,3 +684,4 @@ function crearRutasServices({ pool }) {
 }
 
 module.exports = crearRutasServices;
+

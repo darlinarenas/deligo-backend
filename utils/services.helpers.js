@@ -175,6 +175,21 @@ function mapearTokenServicio(row) {
 }
 
 function buildFrontendBaseUrl(value, req) {
+  /*
+    La URL pública del frontend debe venir del backend.
+    Producción:
+      FRONTEND_URL=https://tu-frontend.vercel.app
+
+    Desarrollo:
+      Puedes usar FRONTEND_URL=http://TU-IP-LOCAL:5500
+      para probar desde el celular.
+  */
+  const fromEnv = limpiarTexto(process.env.FRONTEND_URL || "");
+
+  if (fromEnv) {
+    return fromEnv.endsWith("/") ? fromEnv : `${fromEnv}/`;
+  }
+
   const raw = limpiarTexto(value || req.get("origin") || "");
 
   if (!raw) return "";
@@ -213,3 +228,4 @@ module.exports = {
   buildFrontendBaseUrl,
   buildReceiverConfirmUrl
 };
+
