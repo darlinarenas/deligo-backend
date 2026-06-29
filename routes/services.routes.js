@@ -99,7 +99,7 @@ function crearRutasServices({ pool }) {
     );
 
     const totalFromBody = numero(body.totalAmount || body.totalEnvio || body.total, 0);
-    const calculatedTotal = totalFromBody || calcularMontoEnvio(calculatedDistanceKm);
+    const calculatedTotal = totalFromBody || (calculatedDistanceKm > 0 ? calcularMontoEnvio(calculatedDistanceKm) : 0);
 
     const customerEmail = normalizarEmail(body.customerEmail || body.senderEmail || body.email || "");
     const receiverName = limpiarTexto(body.receiverName || body.contacto || body.recipientName || "");
@@ -468,14 +468,25 @@ function crearRutasServices({ pool }) {
         [latitude, longitude, token]
       );
 
+      const pickupLatitude = limpiarTexto(service.pickup_latitude || "");
+      const pickupLongitude = limpiarTexto(service.pickup_longitude || "");
+
+      if (!Number(pickupLatitude) || !Number(pickupLongitude)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          ok: false,
+          message: "El envío no tiene ubicación de retiro válida. Vuelve a crear el link usando el botón de ubicación de retiro."
+        });
+      }
+
       const distanceKm = calcularDistanciaKm(
-        service.pickup_latitude,
-        service.pickup_longitude,
+        pickupLatitude,
+        pickupLongitude,
         latitude,
         longitude
-      ) || numero(service.distance_km, 0);
+      );
 
-      const totalAmount = distanceKm ? calcularMontoEnvio(distanceKm) : numero(service.total_amount, 0);
+      const totalAmount = calcularMontoEnvio(distanceKm);
 
       const serviceResult = await client.query(
         `
@@ -684,5 +695,7 @@ function crearRutasServices({ pool }) {
 }
 
 module.exports = crearRutasServices;
+
+
 
 

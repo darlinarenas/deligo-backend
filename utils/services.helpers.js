@@ -32,7 +32,10 @@ function normalizarEmail(valor) {
 }
 
 function numero(valor, fallback = 0) {
-  const parsed = Number(valor);
+  const limpio = String(valor ?? "").trim().replace(",", ".");
+  if (!limpio) return fallback;
+
+  const parsed = Number(limpio);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
@@ -239,4 +242,6 @@ module.exports = {
   buildFrontendBaseUrl,
   buildReceiverConfirmUrl
 };
+
+
 
