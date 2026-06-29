@@ -176,13 +176,9 @@ function mapearTokenServicio(row) {
 
 function buildFrontendBaseUrl(value, req) {
   /*
-    La URL pública del frontend debe venir del backend.
-    Producción:
-      FRONTEND_URL=https://tu-frontend.vercel.app
-
-    Desarrollo:
-      Puedes usar FRONTEND_URL=http://TU-IP-LOCAL:5500
-      para probar desde el celular.
+    El link del receptor lo arma el backend.
+    Fuente principal: process.env.FRONTEND_URL.
+    Fallback seguro de pruebas: frontend Vercel del proyecto.
   */
   const fromEnv = limpiarTexto(process.env.FRONTEND_URL || "");
 
@@ -190,16 +186,8 @@ function buildFrontendBaseUrl(value, req) {
     return fromEnv.endsWith("/") ? fromEnv : `${fromEnv}/`;
   }
 
-  const raw = limpiarTexto(value || req.get("origin") || "");
-
-  if (!raw) return "";
-
-  try {
-    const url = new URL(raw);
-    return url.toString().endsWith("/") ? url.toString() : `${url.toString()}/`;
-  } catch {
-    return raw.endsWith("/") ? raw : `${raw}/`;
-  }
+  const fallback = "https://deli-go-frontend-wheat.vercel.app/index.html";
+  return fallback.endsWith("/") ? fallback : `${fallback}/`;
 }
 
 function buildReceiverConfirmUrl(baseUrl, token) {

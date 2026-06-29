@@ -690,6 +690,7 @@ bootstrapDatabase();
    - El backend debe responder con el origen exacto permitido.
 ====================================================== */
 const ALLOWED_ORIGINS = [
+  "https://bhuz.vercel.app",
   "https://deli-go-frontend-gamma.vercel.app",
   "https://deli-go-frontend-wheat.vercel.app",
   "https://deli-go.netlify.app",
@@ -698,6 +699,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/.*\.vercel\.app$/i,
   /^https:\/\/deli-go-frontend-[a-z0-9-]+\.vercel\.app$/i,
   /^https:\/\/deli-go-frontend\.vercel\.app$/i
 ];
@@ -3039,6 +3041,7 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
 
