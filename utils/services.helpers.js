@@ -178,16 +178,38 @@ function buildFrontendBaseUrl(value, req) {
   /*
     El link del receptor lo arma el backend.
     Fuente principal: process.env.FRONTEND_URL.
-    Fallback seguro de pruebas: frontend Vercel del proyecto.
+
+    IMPORTANTE:
+    FRONTEND_URL debe ser el dominio base del frontend, no index.html.
+    Correcto:
+      https://deli-go-frontend-wheat.vercel.app/
+
+    Evitamos generar:
+      /index.html/?confirmar_envio=...
   */
   const fromEnv = limpiarTexto(process.env.FRONTEND_URL || "");
+  const fallback = "https://deli-go-frontend-wheat.vercel.app/";
 
-  if (fromEnv) {
-    return fromEnv.endsWith("/") ? fromEnv : `${fromEnv}/`;
+  const raw = fromEnv || fallback;
+
+  try {
+    const url = new URL(raw);
+
+    url.search = "";
+    url.hash = "";
+
+    if (url.pathname === "/index.html" || url.pathname === "/index.html/") {
+      url.pathname = "/";
+    }
+
+    return url.toString().endsWith("/") ? url.toString() : `${url.toString()}/`;
+  } catch {
+    const clean = limpiarTexto(raw)
+      .replace(/\/index\.html\/?$/i, "")
+      .replace(/\/+$/, "");
+
+    return `${clean}/`;
   }
-
-  const fallback = "https://deli-go-frontend-wheat.vercel.app/index.html";
-  return fallback.endsWith("/") ? fallback : `${fallback}/`;
 }
 
 function buildReceiverConfirmUrl(baseUrl, token) {
@@ -197,7 +219,8 @@ function buildReceiverConfirmUrl(baseUrl, token) {
     return `/?confirmar_envio=${encodeURIComponent(token)}#envios`;
   }
 
-  return `${cleanBase}?confirmar_envio=${encodeURIComponent(token)}#envios`;
+  const separator = cleanBase.includes("?") ? "&" : "?";
+  return `${cleanBase}${separator}confirmar_envio=${encodeURIComponent(token)}#envios`;
 }
 
 module.exports = {
