@@ -24,6 +24,7 @@ const crearRutasPedidos = require("./routes/pedidos.routes");
 const crearRutasPlatos = require("./routes/platos.routes");
 const crearRutasAdmin = require("./routes/admin.routes");
 const crearRutasDirecciones = require("./routes/direcciones.routes");
+const crearRutasServices = require("./routes/services.routes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -2652,6 +2653,22 @@ app.post("/invite/:token/save-guest", async (req, res) => {
 });
 
 
+
+/* ======================================================
+   RUTAS SERVICES BHUZ
+   - Backend real y escalable para envíos y futuros servicios.
+   - POST /api/services
+   - GET /api/services/:id
+   - POST /api/services/:id/receiver-token
+   - GET /api/services/confirmar/:token
+   - POST /api/services/confirmar/:token
+   - POST /api/services/:id/status
+   - POST /api/services/:id/confirm-delivery
+====================================================== */
+app.use("/api/services", crearRutasServices({
+  pool
+}));
+
 /* ======================================================
    RUTAS PEDIDOS MODULARIZADAS
    - POST /orders
@@ -3022,5 +3039,6 @@ app.listen(PORT, () => {
   console.log("🌐 http://localhost:" + PORT);
   console.log("=================================");
 });
+
 
 
