@@ -227,46 +227,114 @@ function crearRutasServices({ pool }) {
     }
   });
 
+
   /* ======================================================
-     GET /api/services/:id
-     Consulta un servicio.
+     GET /api/services/driver/available
+     Lista servicios reales listos para que un repartidor los acepte.
+     Fuente real: PostgreSQL.
   ====================================================== */
-  router.get("/:id", async (req, res) => {
-    const serviceId = String(req.params.id || "").trim();
-
-    if (!serviceId) {
-      return res.status(400).json({ ok: false, message: "ID de servicio inválido" });
-    }
-
+  router.get("/driver/available", async (req, res) => {
     try {
-      const service = await obtenerServicioPorId(serviceId);
-
-      if (!service) {
-        return res.status(404).json({ ok: false, message: "Servicio no encontrado" });
-      }
-
-      const historyResult = await pool.query(
+      const result = await pool.query(
         `
         SELECT *
-        FROM bhuz_service_status_history
-        WHERE service_id = $1
+        FROM bhuz_services
+        WHERE status = 'SEARCHING_DRIVER'
+          AND COALESCE(delivery_code_used, FALSE) = FALSE
         ORDER BY created_at ASC
-        `,
-        [serviceId]
+        LIMIT 30
+        `
       );
 
       return res.json({
         ok: true,
         source: "postgres",
-        service: mapearServicio(service),
-        history: historyResult.rows
+        services: result.rows.map(mapearServicio)
       });
     } catch (error) {
-      console.error("Error consultando servicio:", error.message);
-
+      console.error("Error listando servicios disponibles:", error.message);
       return res.status(500).json({
         ok: false,
-        message: "Error consultando servicio",
+        message: "Error consultando servicios disponibles",
+        error: error.message
+      });
+    }
+  });
+
+  /* ======================================================
+     GET /api/services/driver/:driverId/active
+     Consulta el servicio activo de un repartidor.
+  ====================================================== */
+  router.get("/driver/:driverId/active", async (req, res) => {
+    const driverId = limpiarTexto(req.params.driverId || "");
+
+    if (!driverId) {
+      return res.status(400).json({ ok: false, message: "ID de repartidor inválido" });
+    }
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM bhuz_services
+        WHERE driver_id = $1
+          AND status IN ('DRIVER_ASSIGNED','GOING_TO_PICKUP','PACKAGE_PICKED','GOING_TO_DELIVERY')
+          AND COALESCE(delivery_code_used, FALSE) = FALSE
+        ORDER BY updated_at DESC
+        LIMIT 1
+        `,
+        [driverId]
+      );
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        service: mapearServicio(result.rows[0] || null)
+      });
+    } catch (error) {
+      console.error("Error consultando servicio activo repartidor:", error.message);
+      return res.status(500).json({
+        ok: false,
+        message: "Error consultando servicio activo",
+        error: error.message
+      });
+    }
+  });
+
+  /* ======================================================
+     GET /api/services/driver/:driverId/history
+     Historial simple de entregas del repartidor.
+  ====================================================== */
+  router.get("/driver/:driverId/history", async (req, res) => {
+    const driverId = limpiarTexto(req.params.driverId || "");
+
+    if (!driverId) {
+      return res.status(400).json({ ok: false, message: "ID de repartidor inválido" });
+    }
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM bhuz_services
+        WHERE driver_id = $1
+          AND status = 'DELIVERED'
+        ORDER BY updated_at DESC
+        LIMIT 50
+        `,
+        [driverId]
+      );
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        services: result.rows.map(mapearServicio)
+      });
+    } catch (error) {
+      console.error("Error consultando historial repartidor:", error.message);
+      return res.status(500).json({
+        ok: false,
+        message: "Error consultando historial del repartidor",
         error: error.message
       });
     }
@@ -540,6 +608,141 @@ function crearRutasServices({ pool }) {
     }
   });
 
+
+  /* ======================================================
+     GET /api/services/:id
+     Consulta un servicio.
+  ====================================================== */
+  router.get("/:id", async (req, res) => {
+    const serviceId = String(req.params.id || "").trim();
+
+    if (!serviceId) {
+      return res.status(400).json({ ok: false, message: "ID de servicio inválido" });
+    }
+
+    try {
+      const service = await obtenerServicioPorId(serviceId);
+
+      if (!service) {
+        return res.status(404).json({ ok: false, message: "Servicio no encontrado" });
+      }
+
+      const historyResult = await pool.query(
+        `
+        SELECT *
+        FROM bhuz_service_status_history
+        WHERE service_id = $1
+        ORDER BY created_at ASC
+        `,
+        [serviceId]
+      );
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        service: mapearServicio(service),
+        history: historyResult.rows
+      });
+    } catch (error) {
+      console.error("Error consultando servicio:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error consultando servicio",
+        error: error.message
+      });
+    }
+  });
+
+
+  /* ======================================================
+     POST /api/services/:id/accept
+     Repartidor acepta un servicio disponible.
+  ====================================================== */
+  router.post("/:id/accept", async (req, res) => {
+    const serviceId = String(req.params.id || "").trim();
+    const driverId = limpiarTexto(req.body?.driverId || req.body?.id || "");
+    const driverName = limpiarTexto(req.body?.driverName || req.body?.name || "Repartidor BHUZ");
+    const driverPhone = limpiarTexto(req.body?.driverPhone || req.body?.phone || "");
+
+    if (!serviceId) {
+      return res.status(400).json({ ok: false, message: "ID de servicio inválido" });
+    }
+
+    if (!driverId) {
+      return res.status(400).json({ ok: false, message: "ID de repartidor obligatorio" });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const service = await obtenerServicioPorId(serviceId, client);
+
+      if (!service) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ ok: false, message: "Servicio no encontrado" });
+      }
+
+      if (service.status !== "SEARCHING_DRIVER") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          ok: false,
+          message: "Este servicio ya no está disponible para aceptar"
+        });
+      }
+
+      const result = await client.query(
+        `
+        UPDATE bhuz_services
+        SET
+          status = 'DRIVER_ASSIGNED',
+          driver_id = $1,
+          driver_name = $2,
+          updated_at = NOW()
+        WHERE id = $3
+          AND status = 'SEARCHING_DRIVER'
+        RETURNING *
+        `,
+        [driverId, driverName, serviceId]
+      );
+
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ ok: false, message: "Otro repartidor ya aceptó este servicio" });
+      }
+
+      await insertarHistorial(client, {
+        serviceId,
+        previousStatus: service.status,
+        newStatus: "DRIVER_ASSIGNED",
+        changedBy: driverId,
+        notes: `Servicio aceptado por ${driverName}`
+      });
+
+      await client.query("COMMIT");
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        message: "Servicio aceptado correctamente",
+        service: mapearServicio(result.rows[0])
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Error aceptando servicio:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error aceptando servicio",
+        error: error.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   /* ======================================================
      POST /api/services/:id/status
      Actualiza estado desde backend/panel/repartidor.
@@ -695,6 +898,9 @@ function crearRutasServices({ pool }) {
 }
 
 module.exports = crearRutasServices;
+
+
+
 
 
 
