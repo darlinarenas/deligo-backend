@@ -2989,7 +2989,10 @@ app.get("/db-test", async (req, res) => {
    - No borra JSON.
    - Evita duplicados por ID.
 ====================================================== */
-app.get("/db-migrate", async (req, res) => {
+app.post("/db-migrate", async (req, res) => {
+  if (!process.env.MIGRATION_SECRET || req.get("x-migration-secret") !== process.env.MIGRATION_SECRET) {
+    return res.status(404).json({ ok: false, message: "Ruta no disponible" });
+  }
   try {
     const migrated = await migrateJsonToPostgres();
     const counts = await getDatabaseCounts();

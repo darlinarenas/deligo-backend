@@ -30,6 +30,27 @@ const {
 function crearRutasServices({ pool }) {
   const router = express.Router();
 
+  const TRANSICIONES = {
+    PENDING_PAYMENT: new Set(["WAITING_RECEIVER_LOCATION", "CANCELLED"]),
+    PAID: new Set(["WAITING_RECEIVER_LOCATION", "SEARCHING_DRIVER", "CANCELLED"]),
+    WAITING_RECEIVER_LOCATION: new Set(["SEARCHING_DRIVER", "CANCELLED"]),
+    SEARCHING_DRIVER: new Set(["DRIVER_ASSIGNED", "CANCELLED"]),
+    DRIVER_ASSIGNED: new Set(["GOING_TO_PICKUP", "CANCELLED"]),
+    GOING_TO_PICKUP: new Set(["PACKAGE_PICKED", "CANCELLED"]),
+    PACKAGE_PICKED: new Set(["GOING_TO_DELIVERY"]),
+    GOING_TO_DELIVERY: new Set(["DELIVERED"]),
+    DELIVERED: new Set(),
+    CANCELLED: new Set()
+  };
+
+  function puedeCambiarEstado(actual, siguiente) {
+    return actual === siguiente || Boolean(TRANSICIONES[actual]?.has(siguiente));
+  }
+
+  function esActorRepartidor(changedBy, service) {
+    return Boolean(service.driver_id) && String(changedBy || "") === String(service.driver_id);
+  }
+
   async function insertarHistorial(client, { serviceId, previousStatus, newStatus, changedBy, notes }) {
     await client.query(
       `
@@ -90,16 +111,15 @@ function crearRutasServices({ pool }) {
     const deliveryLatitude = limpiarTexto(body.deliveryLatitude || body.entregaLat || body.delivery?.lat);
     const deliveryLongitude = limpiarTexto(body.deliveryLongitude || body.entregaLng || body.delivery?.lng);
 
-    const distanceKmFromBody = numero(body.distanceKm || body.distanciaKm, 0);
-    const calculatedDistanceKm = distanceKmFromBody || calcularDistanciaKm(
+    // Seguridad: distancia y precio se calculan exclusivamente en backend.
+    // Los valores enviados por el navegador nunca se aceptan como definitivos.
+    const calculatedDistanceKm = calcularDistanciaKm(
       pickupLatitude,
       pickupLongitude,
       deliveryLatitude,
       deliveryLongitude
     );
-
-    const totalFromBody = numero(body.totalAmount || body.totalEnvio || body.total, 0);
-    const calculatedTotal = totalFromBody || (calculatedDistanceKm > 0 ? calcularMontoEnvio(calculatedDistanceKm) : 0);
+    const calculatedTotal = calculatedDistanceKm > 0 ? calcularMontoEnvio(calculatedDistanceKm) : 0;
 
     const customerEmail = normalizarEmail(body.customerEmail || body.senderEmail || body.email || "");
     const receiverName = limpiarTexto(body.receiverName || body.contacto || body.recipientName || "");
@@ -192,7 +212,7 @@ function crearRutasServices({ pool }) {
           limpiarTexto(body.paymentStatus || "PENDING").toUpperCase(),
           limpiarTexto(body.paymentMethod || ""),
 
-          normalizarEstadoServicio(body.status || "PENDING_PAYMENT"),
+          "PENDING_PAYMENT",
           deliveryCode
         ]
       );
@@ -700,12 +720,13 @@ function crearRutasServices({ pool }) {
           status = 'DRIVER_ASSIGNED',
           driver_id = $1,
           driver_name = $2,
+          driver_phone = $3,
           updated_at = NOW()
-        WHERE id = $3
+        WHERE id = $4
           AND status = 'SEARCHING_DRIVER'
         RETURNING *
         `,
-        [driverId, driverName, serviceId]
+        [driverId, driverName, driverPhone, serviceId]
       );
 
       if (!result.rows[0]) {
@@ -767,6 +788,25 @@ function crearRutasServices({ pool }) {
       if (!service) {
         await client.query("ROLLBACK");
         return res.status(404).json({ ok: false, message: "Servicio no encontrado" });
+      }
+
+      if (!puedeCambiarEstado(service.status, newStatus)) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          ok: false,
+          message: `Transición no permitida: ${service.status} → ${newStatus}`
+        });
+      }
+
+      const estadosDelRepartidor = new Set(["GOING_TO_PICKUP", "PACKAGE_PICKED", "GOING_TO_DELIVERY"]);
+      if (estadosDelRepartidor.has(newStatus) && !esActorRepartidor(changedBy, service)) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ ok: false, message: "Solo el repartidor asignado puede actualizar este estado" });
+      }
+
+      if (newStatus === "CANCELLED" && ["PACKAGE_PICKED", "GOING_TO_DELIVERY", "DELIVERED"].includes(service.status)) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ ok: false, message: "El envío ya no puede cancelarse en este estado" });
       }
 
       const result = await client.query(
@@ -842,6 +882,16 @@ function crearRutasServices({ pool }) {
       if (service.delivery_code_used === true) {
         await client.query("ROLLBACK");
         return res.status(409).json({ ok: false, message: "Este código ya fue utilizado" });
+      }
+
+      if (service.status !== "GOING_TO_DELIVERY") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ ok: false, message: "La entrega solo puede confirmarse cuando el paquete va hacia el receptor" });
+      }
+
+      if (!driverId || String(service.driver_id || "") !== driverId) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ ok: false, message: "Solo el repartidor asignado puede confirmar la entrega" });
       }
 
       if (String(service.delivery_code || "").trim() !== deliveryCode) {
