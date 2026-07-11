@@ -47,6 +47,7 @@ module.exports = function crearRutasDrivers({ pool }) {
     try { const e=email(req.body?.email); const p=String(req.body?.password||'');
       const q=await pool.query('SELECT * FROM bhuz_drivers WHERE LOWER(email)=LOWER($1)',[e]); const d=q.rows[0];
       if(!d || String(d.password||'')!==p) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
+      if(d.administrative_status==='PENDING') return res.status(403).json({ok:false,message:'Tu cuenta está pendiente de aprobación administrativa.'});
       if(['BLOCKED','REJECTED','SUSPENDED'].includes(d.administrative_status)) return res.status(403).json({ok:false,message:`Cuenta ${d.administrative_status.toLowerCase()}.`});
       await pool.query('UPDATE bhuz_drivers SET last_seen_at=NOW(),updated_at=NOW() WHERE id=$1',[d.id]);
       res.json({ok:true,driver:mapDriver(d)});

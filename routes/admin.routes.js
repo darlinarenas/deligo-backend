@@ -583,6 +583,101 @@ router.delete("/restaurants/:id", async (req, res) => {
   }
 });
 
+
+/* ======================================================
+   ADMIN REPARTIDORES
+====================================================== */
+function mapAdminDriver(row) {
+  return row ? {
+    id: row.id,
+    fullName: row.full_name,
+    email: row.email,
+    phone: row.phone,
+    identityDocument: row.identity_document,
+    birthDate: row.birth_date,
+    address: row.address,
+    countryCode: row.country_code,
+    city: row.city,
+    zone: row.zone,
+    vehicleType: row.vehicle_type,
+    vehicleBrand: row.vehicle_brand,
+    vehicleModel: row.vehicle_model,
+    vehiclePlate: row.vehicle_plate,
+    vehicleColor: row.vehicle_color,
+    emergencyContact: row.emergency_contact,
+    administrativeStatus: row.administrative_status,
+    operationalStatus: row.operational_status,
+    isAvailable: !!row.is_available,
+    rating: Number(row.rating || 0),
+    completedDeliveries: Number(row.completed_deliveries || 0),
+    acceptanceRate: Number(row.acceptance_rate || 0),
+    commissionPercent: Number(row.commission_percent || 0),
+    baseCurrency: row.base_currency || "USD",
+    lastLatitude: row.last_latitude,
+    lastLongitude: row.last_longitude,
+    lastLocationAt: row.last_location_at,
+    lastSeenAt: row.last_seen_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  } : null;
+}
+
+router.get("/drivers", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM bhuz_drivers
+      ORDER BY
+        CASE administrative_status WHEN 'PENDING' THEN 0 WHEN 'APPROVED' THEN 1 ELSE 2 END,
+        created_at DESC
+    `);
+    return res.json({ ok: true, drivers: result.rows.map(mapAdminDriver) });
+  } catch (error) {
+    console.error("Error listando repartidores:", error.message);
+    return res.status(500).json({ ok: false, message: "No se pudieron cargar los repartidores." });
+  }
+});
+
+router.get("/drivers/:id", async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM bhuz_drivers WHERE id=$1 LIMIT 1`, [req.params.id]);
+    const driver = result.rows[0];
+    if (!driver) return res.status(404).json({ ok:false, message:"Repartidor no encontrado." });
+    const summary = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE j.status='DELIVERED')::int AS completed_jobs,
+        COALESCE(SUM(j.driver_earning) FILTER (WHERE j.status='DELIVERED'),0) AS total_earnings,
+        (SELECT COUNT(*)::int FROM bhuz_driver_incidents i WHERE i.driver_id=$1 AND i.status IN ('OPEN','REVIEWING')) AS open_incidents,
+        (SELECT COUNT(*)::int FROM bhuz_driver_settlements s WHERE s.driver_id=$1 AND s.status IN ('DRAFT','PENDING','PARTIALLY_PAID','DISPUTED')) AS pending_settlements
+      FROM bhuz_delivery_jobs j WHERE j.driver_id=$1
+    `, [req.params.id]);
+    const row=summary.rows[0]||{};
+    return res.json({ok:true,driver:mapAdminDriver(driver),summary:{completedJobs:Number(row.completed_jobs||0),totalEarnings:Number(row.total_earnings||0),openIncidents:Number(row.open_incidents||0),pendingSettlements:Number(row.pending_settlements||0)}});
+  } catch (error) {
+    console.error("Error leyendo repartidor:", error.message);
+    return res.status(500).json({ok:false,message:"No se pudo cargar la ficha del repartidor."});
+  }
+});
+
+router.patch("/drivers/:id/status", async (req, res) => {
+  const status=String(req.body?.status||"").trim().toUpperCase();
+  const valid=["PENDING","APPROVED","SUSPENDED","BLOCKED","REJECTED"];
+  if(!valid.includes(status)) return res.status(400).json({ok:false,message:"Estado de repartidor inválido."});
+  try {
+    const operational=status==='APPROVED'?'OFFLINE':'OFFLINE';
+    const result=await pool.query(`
+      UPDATE bhuz_drivers SET administrative_status=$2, operational_status=$3,
+        is_available=FALSE, updated_at=NOW()
+      WHERE id=$1 RETURNING *
+    `,[req.params.id,status,operational]);
+    if(!result.rows[0]) return res.status(404).json({ok:false,message:"Repartidor no encontrado."});
+    return res.json({ok:true,message:`Repartidor ${status==='APPROVED'?'aprobado':'actualizado'} correctamente.`,driver:mapAdminDriver(result.rows[0])});
+  } catch(error) {
+    console.error("Error cambiando estado de repartidor:",error.message);
+    return res.status(500).json({ok:false,message:"No se pudo actualizar el estado del repartidor."});
+  }
+});
+
+
   return router;
 }
 
