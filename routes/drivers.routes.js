@@ -64,6 +64,45 @@ module.exports = function crearRutasDrivers({ pool }) {
       );
       ALTER TABLE bhuz_services ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) NOT NULL DEFAULT 0;
       ALTER TABLE bhuz_services ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS assignment_mode TEXT NOT NULL DEFAULT 'OPEN';
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING_ASSIGNMENT';
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_name TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_address TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_reference TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_latitude NUMERIC(10,7);
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_longitude NUMERIC(10,7);
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_name TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_reference TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_latitude NUMERIC(10,7);
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_longitude NUMERIC(10,7);
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS distance_km NUMERIC(10,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS service_total NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS payment_received_by TEXT;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS estimated_pickup_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ALTER TABLE bhuz_driver_ledger ADD COLUMN IF NOT EXISTS base_amount NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_driver_ledger ADD COLUMN IF NOT EXISTS base_currency TEXT NOT NULL DEFAULT 'USD';
+      ALTER TABLE bhuz_driver_ledger ADD COLUMN IF NOT EXISTS settlement_id TEXT;
+      ALTER TABLE bhuz_driver_settlements ADD COLUMN IF NOT EXISTS net_balance NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_driver_settlements ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
+      CREATE TABLE IF NOT EXISTS bhuz_driver_settlement_requests (
+        id TEXT PRIMARY KEY,
+        driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+        requested_mode TEXT NOT NULL DEFAULT 'WEEKLY',
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        reviewed_at TIMESTAMPTZ,
+        reviewed_by TEXT
+      );
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_id TEXT;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_status TEXT DEFAULT 'NOT_REQUIRED';
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) DEFAULT 0;
@@ -131,16 +170,22 @@ module.exports = function crearRutasDrivers({ pool }) {
     try {
       await ensureDriverSchema();
       const driver=await ensureDriver(req.params.driverId,{});
-      await pool.query(`INSERT INTO bhuz_delivery_jobs(id,source_type,source_id,status,pickup_name,pickup_address,pickup_reference,pickup_latitude,pickup_longitude,delivery_name,delivery_address,delivery_reference,delivery_latitude,delivery_longitude,distance_km,service_total,driver_earning,currency,payment_method,payment_received_by)
-        SELECT 'job_'||s.id,'PACKAGE',s.id,'PENDING_ASSIGNMENT',COALESCE(s.customer_name,'Retiro de paquete'),s.pickup_address,s.pickup_reference,s.pickup_latitude,s.pickup_longitude,s.receiver_name,s.delivery_address,s.delivery_reference,s.delivery_latitude,s.delivery_longitude,s.distance_km,s.total_amount,CASE WHEN COALESCE(s.driver_earning,0)>0 THEN s.driver_earning ELSE ROUND(COALESCE(s.total_amount,0)::numeric*0.10,2) END,COALESCE(s.currency,'USD'),s.payment_method,'BHUZ'
-        FROM bhuz_services s WHERE s.status='SEARCHING_DRIVER'
-        ON CONFLICT(source_type,source_id) DO NOTHING`);
-      const [active,open,history,ledger,settlements,stats]=await Promise.all([
+      // La sincronización de paquetes no debe impedir que el repartidor abra su panel.
+      try {
+        await pool.query(`INSERT INTO bhuz_delivery_jobs(id,source_type,source_id,status,pickup_name,pickup_address,pickup_reference,pickup_latitude,pickup_longitude,delivery_name,delivery_address,delivery_reference,delivery_latitude,delivery_longitude,distance_km,service_total,driver_earning,currency,payment_method,payment_received_by)
+          SELECT 'job_'||s.id,'PACKAGE',s.id,'PENDING_ASSIGNMENT',COALESCE(s.customer_name,'Retiro de paquete'),s.pickup_address,s.pickup_reference,s.pickup_latitude,s.pickup_longitude,s.receiver_name,s.delivery_address,s.delivery_reference,s.delivery_latitude,s.delivery_longitude,s.distance_km,s.total_amount,CASE WHEN COALESCE(s.driver_earning,0)>0 THEN s.driver_earning ELSE ROUND(COALESCE(s.total_amount,0)::numeric*0.10,2) END,COALESCE(s.currency,'USD'),s.payment_method,'BHUZ'
+          FROM bhuz_services s WHERE s.status='SEARCHING_DRIVER'
+          ON CONFLICT(source_type,source_id) DO NOTHING`);
+      } catch (syncError) {
+        console.warn('Sincronización de paquetes omitida:', syncError.message);
+      }
+      const [active,open,history,ledger,settlements,requests,stats]=await Promise.all([
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status NOT IN ('DELIVERED','CANCELLED') ORDER BY created_at DESC LIMIT 1`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id IS NULL AND status='PENDING_ASSIGNMENT' ORDER BY priority DESC,created_at ASC LIMIT 30`),
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status IN ('DELIVERED','CANCELLED') ORDER BY COALESCE(delivered_at,updated_at) DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_ledger WHERE driver_id=$1 ORDER BY created_at DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_settlements WHERE driver_id=$1 ORDER BY period_to DESC LIMIT 30`,[driver.id]),
+        pool.query(`SELECT * FROM bhuz_driver_settlement_requests WHERE driver_id=$1 ORDER BY requested_at DESC LIMIT 20`,[driver.id]),
         pool.query(`SELECT COUNT(*) FILTER (WHERE status='DELIVERED' AND delivered_at::date=CURRENT_DATE)::int deliveries_today,
           COALESCE(SUM(driver_earning) FILTER (WHERE status='DELIVERED' AND delivered_at::date=CURRENT_DATE),0) earnings_today,
           COALESCE(SUM(distance_km) FILTER (WHERE status='DELIVERED' AND delivered_at::date=CURRENT_DATE),0) km_today,
@@ -149,7 +194,7 @@ module.exports = function crearRutasDrivers({ pool }) {
           FROM bhuz_delivery_jobs WHERE driver_id=$1`,[driver.id])
       ]);
       const balance=ledger.rows.reduce((a,m)=>a+(m.direction==='CREDIT_DRIVER'?num(m.base_amount||m.amount):-num(m.base_amount||m.amount)),0);
-      res.json({ok:true,driver:mapDriver(driver),activeJob:active.rows[0]||null,availableJobs:open.rows,history:history.rows,ledger:ledger.rows,settlements:settlements.rows,stats:{...stats.rows[0],balance}});
+      res.json({ok:true,driver:mapDriver(driver),activeJob:active.rows[0]||null,availableJobs:open.rows,history:history.rows,ledger:ledger.rows,settlements:settlements.rows,settlementRequests:requests.rows,stats:{...stats.rows[0],balance}});
     } catch(err){console.error(err);res.status(500).json({ok:false,message:'No se pudo cargar el panel del repartidor.',detail:err.message});}
   });
 
@@ -200,6 +245,18 @@ module.exports = function crearRutasDrivers({ pool }) {
   });
 
   r.post('/:driverId/incidents', async(req,res)=>{ try { const q=await pool.query(`INSERT INTO bhuz_driver_incidents(id,driver_id,delivery_job_id,incident_type,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[id('inc'),req.params.driverId,req.body?.jobId||null,req.body?.incidentType||'OTHER',req.body?.description||'',req.body?.evidenceUrl||null]);res.status(201).json({ok:true,incident:q.rows[0]}); }catch(err){res.status(500).json({ok:false,message:'No se pudo registrar la incidencia.'});} });
+
+  r.post('/:driverId/settlement-requests', async(req,res)=>{
+    try {
+      await ensureDriverSchema();
+      const driver=(await pool.query('SELECT id FROM bhuz_drivers WHERE id=$1',[req.params.driverId])).rows[0];
+      if(!driver) return res.status(404).json({ok:false,message:'Repartidor no encontrado.'});
+      const pending=(await pool.query(`SELECT * FROM bhuz_driver_settlement_requests WHERE driver_id=$1 AND status='PENDING' ORDER BY requested_at DESC LIMIT 1`,[driver.id])).rows[0];
+      if(pending) return res.status(409).json({ok:false,message:'Ya tienes una solicitud de cierre pendiente.',request:pending});
+      const q=await pool.query(`INSERT INTO bhuz_driver_settlement_requests(id,driver_id,requested_mode,note,status) VALUES($1,$2,$3,$4,'PENDING') RETURNING *`,[id('settle_req'),driver.id,'WEEKLY',String(req.body?.note||'').trim()||null]);
+      res.status(201).json({ok:true,message:'Solicitud de cierre enviada al administrador.',request:q.rows[0]});
+    } catch(err){console.error(err);res.status(500).json({ok:false,message:'No se pudo solicitar el cierre.'});}
+  });
 
   r.post('/:driverId/settlements/preview', async(req,res)=>{
     try { const from=req.body?.from||'1970-01-01'; const to=req.body?.to||new Date().toISOString(); const rate=Math.max(num(req.body?.exchangeRate,1),0.00000001); const currency=req.body?.currency||'USD';

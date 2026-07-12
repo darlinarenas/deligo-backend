@@ -1,0 +1,48 @@
+BEGIN;
+
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS assignment_mode TEXT NOT NULL DEFAULT 'OPEN';
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING_ASSIGNMENT';
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_name TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_address TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_reference TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_latitude NUMERIC(10,7);
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS pickup_longitude NUMERIC(10,7);
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_name TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_reference TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_latitude NUMERIC(10,7);
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivery_longitude NUMERIC(10,7);
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS distance_km NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS service_total NUMERIC(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS payment_method TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS payment_received_by TEXT;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS estimated_pickup_at TIMESTAMPTZ;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+ALTER TABLE IF EXISTS bhuz_delivery_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE IF EXISTS bhuz_driver_ledger ADD COLUMN IF NOT EXISTS base_amount NUMERIC(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_driver_ledger ADD COLUMN IF NOT EXISTS base_currency TEXT NOT NULL DEFAULT 'USD';
+ALTER TABLE IF EXISTS bhuz_driver_ledger ADD COLUMN IF NOT EXISTS settlement_id TEXT;
+ALTER TABLE IF EXISTS bhuz_driver_settlements ADD COLUMN IF NOT EXISTS net_balance NUMERIC(14,2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS bhuz_driver_settlements ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
+
+CREATE TABLE IF NOT EXISTS bhuz_driver_settlement_requests (
+  id TEXT PRIMARY KEY,
+  driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+  requested_mode TEXT NOT NULL DEFAULT 'WEEKLY',
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_driver_settlement_requests_status
+  ON bhuz_driver_settlement_requests(driver_id,status,requested_at DESC);
+
+COMMIT;
