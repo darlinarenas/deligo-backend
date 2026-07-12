@@ -8,6 +8,76 @@ const num = (v,d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
 module.exports = function crearRutasDrivers({ pool }) {
   const r = express.Router();
 
+  let schemaReadyPromise = null;
+  async function ensureDriverSchema() {
+    if (schemaReadyPromise) return schemaReadyPromise;
+    schemaReadyPromise = pool.query(`
+      CREATE TABLE IF NOT EXISTS bhuz_drivers (
+        id TEXT PRIMARY KEY, user_id TEXT, full_name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+        password TEXT, phone TEXT, identity_document TEXT, birth_date DATE, address TEXT,
+        country_code TEXT NOT NULL DEFAULT 'VE', city TEXT NOT NULL DEFAULT 'Punto Fijo', zone TEXT,
+        vehicle_type TEXT DEFAULT 'Moto', vehicle_brand TEXT, vehicle_model TEXT, vehicle_plate TEXT,
+        vehicle_color TEXT, emergency_contact TEXT, photo_url TEXT, vehicle_photo_url TEXT,
+        license_url TEXT, vehicle_document_url TEXT,
+        administrative_status TEXT NOT NULL DEFAULT 'PENDING', operational_status TEXT NOT NULL DEFAULT 'OFFLINE',
+        is_available BOOLEAN NOT NULL DEFAULT FALSE, rating NUMERIC(3,2) NOT NULL DEFAULT 5,
+        completed_deliveries INTEGER NOT NULL DEFAULT 0, acceptance_rate NUMERIC(5,2) NOT NULL DEFAULT 100,
+        commission_percent NUMERIC(5,2) NOT NULL DEFAULT 10, base_currency TEXT NOT NULL DEFAULT 'USD',
+        last_latitude NUMERIC(10,7), last_longitude NUMERIC(10,7), last_location_at TIMESTAMPTZ,
+        last_seen_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS bhuz_delivery_jobs (
+        id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL, driver_id TEXT REFERENCES bhuz_drivers(id),
+        assignment_mode TEXT NOT NULL DEFAULT 'OPEN', status TEXT NOT NULL DEFAULT 'PENDING_ASSIGNMENT', priority INTEGER NOT NULL DEFAULT 0,
+        pickup_name TEXT, pickup_address TEXT, pickup_reference TEXT, pickup_latitude NUMERIC(10,7), pickup_longitude NUMERIC(10,7),
+        delivery_name TEXT, delivery_address TEXT, delivery_reference TEXT, delivery_latitude NUMERIC(10,7), delivery_longitude NUMERIC(10,7),
+        distance_km NUMERIC(10,2) NOT NULL DEFAULT 0, service_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        driver_earning NUMERIC(14,2) NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD', payment_method TEXT,
+        payment_received_by TEXT, estimated_pickup_at TIMESTAMPTZ, assigned_at TIMESTAMPTZ, picked_up_at TIMESTAMPTZ,
+        delivered_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_bhuz_jobs_source ON bhuz_delivery_jobs(source_type, source_id);
+      CREATE TABLE IF NOT EXISTS bhuz_driver_ledger (
+        id TEXT PRIMARY KEY, driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+        delivery_job_id TEXT REFERENCES bhuz_delivery_jobs(id), movement_type TEXT NOT NULL,
+        direction TEXT NOT NULL, amount NUMERIC(14,2) NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
+        exchange_rate NUMERIC(18,8) NOT NULL DEFAULT 1, base_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+        base_currency TEXT NOT NULL DEFAULT 'USD', description TEXT, settlement_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS bhuz_driver_settlements (
+        id TEXT PRIMARY KEY, driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+        period_from TIMESTAMPTZ NOT NULL, period_to TIMESTAMPTZ NOT NULL, cutoff_mode TEXT NOT NULL DEFAULT 'CUSTOM',
+        country_code TEXT NOT NULL DEFAULT 'VE', currency TEXT NOT NULL DEFAULT 'USD', exchange_rate NUMERIC(18,8) NOT NULL DEFAULT 1,
+        total_jobs INTEGER NOT NULL DEFAULT 0, service_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        driver_earnings NUMERIC(14,2) NOT NULL DEFAULT 0, cash_collected NUMERIC(14,2) NOT NULL DEFAULT 0,
+        digital_collected NUMERIC(14,2) NOT NULL DEFAULT 0, tips NUMERIC(14,2) NOT NULL DEFAULT 0,
+        bonuses NUMERIC(14,2) NOT NULL DEFAULT 0, penalties NUMERIC(14,2) NOT NULL DEFAULT 0,
+        driver_owes_bhuz NUMERIC(14,2) NOT NULL DEFAULT 0, bhuz_owes_driver NUMERIC(14,2) NOT NULL DEFAULT 0,
+        net_balance NUMERIC(14,2) NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'PENDING', notes TEXT,
+        proof_url TEXT, created_by TEXT, paid_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS bhuz_driver_incidents (
+        id TEXT PRIMARY KEY, driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+        delivery_job_id TEXT REFERENCES bhuz_delivery_jobs(id), incident_type TEXT NOT NULL, description TEXT,
+        status TEXT NOT NULL DEFAULT 'OPEN', evidence_url TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), resolved_at TIMESTAMPTZ
+      );
+      ALTER TABLE bhuz_services ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE bhuz_services ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_id TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_status TEXT DEFAULT 'NOT_REQUIRED';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_earning NUMERIC(14,2) DEFAULT 0;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS assignment_mode TEXT DEFAULT 'OPEN';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_job_id TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_bhuz_jobs_driver_status ON bhuz_delivery_jobs(driver_id,status,created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bhuz_jobs_open ON bhuz_delivery_jobs(status,priority DESC,created_at);
+      CREATE INDEX IF NOT EXISTS idx_bhuz_ledger_driver_date ON bhuz_driver_ledger(driver_id,created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bhuz_settlements_driver_date ON bhuz_driver_settlements(driver_id,period_to DESC);
+    `).catch(err => { schemaReadyPromise = null; throw err; });
+    return schemaReadyPromise;
+  }
+
   const mapDriver = x => x ? ({
     id:x.id, userId:x.user_id, fullName:x.full_name, email:x.email, phone:x.phone,
     identityDocument:x.identity_document, address:x.address, countryCode:x.country_code,
@@ -32,6 +102,7 @@ module.exports = function crearRutasDrivers({ pool }) {
 
   r.post('/register', async(req,res)=>{
     try {
+      await ensureDriverSchema();
       const b=req.body||{}; const e=email(b.email);
       if(!b.fullName||!e||!b.password||!b.phone) return res.status(400).json({ok:false,message:'Nombre, correo, contraseña y teléfono son obligatorios.'});
       const exists=await pool.query('SELECT id FROM bhuz_drivers WHERE LOWER(email)=LOWER($1)',[e]);
@@ -44,7 +115,7 @@ module.exports = function crearRutasDrivers({ pool }) {
   });
 
   r.post('/login', async(req,res)=>{
-    try { const e=email(req.body?.email); const p=String(req.body?.password||'');
+    try { await ensureDriverSchema(); const e=email(req.body?.email); const p=String(req.body?.password||'');
       const q=await pool.query('SELECT * FROM bhuz_drivers WHERE LOWER(email)=LOWER($1)',[e]); const d=q.rows[0];
       if(!d || String(d.password||'')!==p) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
       if(d.administrative_status==='PENDING') return res.status(403).json({ok:false,message:'Tu cuenta está pendiente de aprobación administrativa.'});
@@ -58,9 +129,10 @@ module.exports = function crearRutasDrivers({ pool }) {
 
   r.get('/:driverId/dashboard', async(req,res)=>{
     try {
+      await ensureDriverSchema();
       const driver=await ensureDriver(req.params.driverId,{});
       await pool.query(`INSERT INTO bhuz_delivery_jobs(id,source_type,source_id,status,pickup_name,pickup_address,pickup_reference,pickup_latitude,pickup_longitude,delivery_name,delivery_address,delivery_reference,delivery_latitude,delivery_longitude,distance_km,service_total,driver_earning,currency,payment_method,payment_received_by)
-        SELECT 'job_'||s.id,'PACKAGE',s.id,'PENDING_ASSIGNMENT',COALESCE(s.customer_name,'Retiro de paquete'),s.pickup_address,s.pickup_reference,s.pickup_latitude,s.pickup_longitude,s.receiver_name,s.delivery_address,s.delivery_reference,s.delivery_latitude,s.delivery_longitude,s.distance_km,s.total_amount,CASE WHEN COALESCE(s.driver_earning,0)>0 THEN s.driver_earning ELSE ROUND(s.total_amount*0.10,2) END,COALESCE(s.currency,'USD'),s.payment_method,'BHUZ'
+        SELECT 'job_'||s.id,'PACKAGE',s.id,'PENDING_ASSIGNMENT',COALESCE(s.customer_name,'Retiro de paquete'),s.pickup_address,s.pickup_reference,s.pickup_latitude,s.pickup_longitude,s.receiver_name,s.delivery_address,s.delivery_reference,s.delivery_latitude,s.delivery_longitude,s.distance_km,s.total_amount,CASE WHEN COALESCE(s.driver_earning,0)>0 THEN s.driver_earning ELSE ROUND(COALESCE(s.total_amount,0)::numeric*0.10,2) END,COALESCE(s.currency,'USD'),s.payment_method,'BHUZ'
         FROM bhuz_services s WHERE s.status='SEARCHING_DRIVER'
         ON CONFLICT(source_type,source_id) DO NOTHING`);
       const [active,open,history,ledger,settlements,stats]=await Promise.all([
@@ -78,7 +150,7 @@ module.exports = function crearRutasDrivers({ pool }) {
       ]);
       const balance=ledger.rows.reduce((a,m)=>a+(m.direction==='CREDIT_DRIVER'?num(m.base_amount||m.amount):-num(m.base_amount||m.amount)),0);
       res.json({ok:true,driver:mapDriver(driver),activeJob:active.rows[0]||null,availableJobs:open.rows,history:history.rows,ledger:ledger.rows,settlements:settlements.rows,stats:{...stats.rows[0],balance}});
-    } catch(err){console.error(err);res.status(500).json({ok:false,message:'No se pudo cargar el panel del repartidor.'});}
+    } catch(err){console.error(err);res.status(500).json({ok:false,message:'No se pudo cargar el panel del repartidor.',detail:err.message});}
   });
 
   r.patch('/:driverId/availability', async(req,res)=>{
