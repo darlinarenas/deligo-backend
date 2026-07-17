@@ -684,8 +684,8 @@ router.patch("/drivers/:id", async(req,res)=>{
     const q=await pool.query(`UPDATE bhuz_drivers SET
       full_name=COALESCE(NULLIF($2,''),full_name),phone=COALESCE(NULLIF($3,''),phone),identity_document=COALESCE(NULLIF($4,''),identity_document),
       birth_date=COALESCE(NULLIF($5,'')::date,birth_date),address=COALESCE(NULLIF($6,''),address),country_code=COALESCE(NULLIF($7,''),country_code),city=COALESCE(NULLIF($8,''),city),zone=COALESCE(NULLIF($9,''),zone),
-      vehicle_type=COALESCE(NULLIF($10,''),vehicle_type),vehicle_brand=COALESCE(NULLIF($11,''),vehicle_brand),vehicle_model=COALESCE(NULLIF($12,''),vehicle_model),vehicle_plate=COALESCE(NULLIF($13,''),vehicle_plate),vehicle_color=COALESCE(NULLIF($14,''),vehicle_color),emergency_contact=COALESCE(NULLIF($15,''),emergency_contact),updated_at=NOW()
-      WHERE id=$1 RETURNING *`,[req.params.id,b.fullName||'',b.phone||'',b.identityDocument||'',b.birthDate||'',b.address||'',b.countryCode||'',b.city||'',b.zone||'',b.vehicleType||'',b.vehicleBrand||'',b.vehicleModel||'',b.vehiclePlate||'',b.vehicleColor||'',b.emergencyContact||'']);
+      vehicle_type=COALESCE(NULLIF($10,''),vehicle_type),vehicle_brand=COALESCE(NULLIF($11,''),vehicle_brand),vehicle_model=COALESCE(NULLIF($12,''),vehicle_model),vehicle_plate=COALESCE(NULLIF($13,''),vehicle_plate),vehicle_color=COALESCE(NULLIF($14,''),vehicle_color),emergency_contact=COALESCE(NULLIF($15,''),emergency_contact),commission_percent=COALESCE($16,commission_percent),updated_at=NOW()
+      WHERE id=$1 RETURNING *`,[req.params.id,b.fullName||'',b.phone||'',b.identityDocument||'',b.birthDate||'',b.address||'',b.countryCode||'',b.city||'',b.zone||'',b.vehicleType||'',b.vehicleBrand||'',b.vehicleModel||'',b.vehiclePlate||'',b.vehicleColor||'',b.emergencyContact||'',b.commissionPercent===''||b.commissionPercent==null?null:Number(b.commissionPercent)]);
     if(!q.rows[0]) return res.status(404).json({ok:false,message:'Repartidor no encontrado.'});
     res.json({ok:true,message:'Datos del repartidor actualizados.',driver:mapAdminDriver(q.rows[0])});
   } catch(error){console.error(error);res.status(500).json({ok:false,message:'No se pudieron actualizar los datos del repartidor.'});}
@@ -696,12 +696,14 @@ router.patch("/drivers/:id/status", async (req, res) => {
   const valid=["PENDING","APPROVED","SUSPENDED","BLOCKED","REJECTED"];
   if(!valid.includes(status)) return res.status(400).json({ok:false,message:"Estado de repartidor inválido."});
   try {
-    const operational=status==='APPROVED'?'OFFLINE':'OFFLINE';
+    const operational='OFFLINE';
+    const commissionPercent=req.body?.commissionPercent==null?null:Number(req.body.commissionPercent);
+    if(commissionPercent!==null && (!Number.isFinite(commissionPercent)||commissionPercent<0||commissionPercent>100)) return res.status(400).json({ok:false,message:'La comisión debe estar entre 0 y 100.'});
     const result=await pool.query(`
       UPDATE bhuz_drivers SET administrative_status=$2, operational_status=$3,
-        is_available=FALSE, updated_at=NOW()
+        commission_percent=COALESCE($4,commission_percent), is_available=FALSE, updated_at=NOW()
       WHERE id=$1 RETURNING *
-    `,[req.params.id,status,operational]);
+    `,[req.params.id,status,operational,commissionPercent]);
     if(!result.rows[0]) return res.status(404).json({ok:false,message:"Repartidor no encontrado."});
     return res.json({ok:true,message:`Repartidor ${status==='APPROVED'?'aprobado':'actualizado'} correctamente.`,driver:mapAdminDriver(result.rows[0])});
   } catch(error) {
