@@ -38,6 +38,13 @@ module.exports = function crearRutasDrivers({ pool }) {
         delivered_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS uq_bhuz_jobs_source ON bhuz_delivery_jobs(source_type, source_id);
+      CREATE TABLE IF NOT EXISTS bhuz_driver_job_rejections (
+        driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
+        delivery_job_id TEXT NOT NULL REFERENCES bhuz_delivery_jobs(id) ON DELETE CASCADE,
+        reason TEXT,
+        rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY(driver_id, delivery_job_id)
+      );
       CREATE TABLE IF NOT EXISTS bhuz_driver_ledger (
         id TEXT PRIMARY KEY, driver_id TEXT NOT NULL REFERENCES bhuz_drivers(id) ON DELETE CASCADE,
         delivery_job_id TEXT REFERENCES bhuz_delivery_jobs(id), movement_type TEXT NOT NULL,
@@ -189,7 +196,13 @@ module.exports = function crearRutasDrivers({ pool }) {
       const canReceive=eligibility.session_active===true && eligibility.is_available===true && eligibility.administrative_status==='APPROVED' && eligibility.last_seen_at && new Date(eligibility.last_seen_at).getTime()>Date.now()-12*60*1000;
       const [active,open,history,ledger,settlements,requests,stats]=await Promise.all([
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status NOT IN ('DELIVERED','CANCELLED') ORDER BY created_at DESC LIMIT 1`,[driver.id]),
-        canReceive?pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id IS NULL AND status='PENDING_ASSIGNMENT' ORDER BY priority DESC,created_at ASC LIMIT 30`):Promise.resolve({rows:[]}),
+        canReceive?pool.query(`SELECT j.* FROM bhuz_delivery_jobs j
+          WHERE j.driver_id IS NULL AND j.status='PENDING_ASSIGNMENT'
+            AND NOT EXISTS (
+              SELECT 1 FROM bhuz_driver_job_rejections rj
+              WHERE rj.driver_id=$1 AND rj.delivery_job_id=j.id
+            )
+          ORDER BY j.priority DESC,j.created_at ASC LIMIT 30`,[driver.id]):Promise.resolve({rows:[]}),
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status IN ('DELIVERED','CANCELLED') ORDER BY COALESCE(delivered_at,updated_at) DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_ledger WHERE driver_id=$1 ORDER BY created_at DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_settlements WHERE driver_id=$1 ORDER BY period_to DESC LIMIT 30`,[driver.id]),
@@ -244,6 +257,21 @@ module.exports = function crearRutasDrivers({ pool }) {
   });
 
   r.post('/:driverId/location', async(req,res)=>{ try { await pool.query(`UPDATE bhuz_drivers SET last_latitude=$2,last_longitude=$3,last_location_at=NOW(),last_seen_at=NOW() WHERE id=$1`,[req.params.driverId,req.body?.latitude||null,req.body?.longitude||null]); res.json({ok:true}); } catch(err){res.status(500).json({ok:false,message:'No se pudo guardar la ubicación.'});} });
+
+  r.post('/:driverId/jobs/:jobId/reject', async(req,res)=>{
+    try {
+      await ensureDriverSchema();
+      const eligible=(await pool.query(`SELECT id FROM bhuz_drivers WHERE id=$1 AND administrative_status='APPROVED' AND session_active=TRUE AND is_available=TRUE`,[req.params.driverId])).rows[0];
+      if(!eligible) return res.status(409).json({ok:false,message:'Debes estar conectado y disponible para rechazar un servicio.'});
+      const job=(await pool.query(`SELECT id FROM bhuz_delivery_jobs WHERE id=$1 AND driver_id IS NULL AND status='PENDING_ASSIGNMENT'`,[req.params.jobId])).rows[0];
+      if(!job) return res.status(409).json({ok:false,message:'Este servicio ya no está disponible.'});
+      await pool.query(`INSERT INTO bhuz_driver_job_rejections(driver_id,delivery_job_id,reason,rejected_at)
+        VALUES($1,$2,$3,NOW()) ON CONFLICT(driver_id,delivery_job_id)
+        DO UPDATE SET reason=EXCLUDED.reason,rejected_at=NOW()`,[req.params.driverId,req.params.jobId,String(req.body?.reason||'No conveniente').trim().slice(0,250)]);
+      await pool.query(`UPDATE bhuz_drivers SET is_available=TRUE,operational_status='AVAILABLE',last_seen_at=NOW(),updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
+      return res.json({ok:true,message:'Servicio rechazado. Continuarás disponible para otras solicitudes.'});
+    } catch(err){console.error(err);return res.status(500).json({ok:false,message:'No se pudo rechazar el servicio.'});}
+  });
 
   r.post('/:driverId/jobs/:jobId/accept', async(req,res)=>{
     const client=await pool.connect(); try { await client.query('BEGIN');
