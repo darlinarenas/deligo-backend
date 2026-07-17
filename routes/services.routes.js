@@ -700,6 +700,62 @@ function crearRutasServices({ pool }) {
 
 
   /* ======================================================
+     GET /api/services/customer/history?email=...
+     Historial de paquetes enviados por un cliente.
+  ====================================================== */
+  router.get("/customer/history", async (req, res) => {
+    const customerEmail = normalizarEmail(req.query.email || "");
+
+    if (!customerEmail) {
+      return res.status(400).json({ ok: false, message: "Correo del cliente requerido" });
+    }
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT s.*,
+               COALESCE(j.status, '') AS delivery_job_status,
+               COALESCE(j.driver_id, s.driver_id, '') AS assigned_driver_id,
+               COALESCE(d.full_name, s.driver_name, '') AS assigned_driver_name,
+               COALESCE(d.phone, s.driver_phone, '') AS assigned_driver_phone,
+               COALESCE(d.vehicle_type, '') AS driver_vehicle_type,
+               COALESCE(d.vehicle_plate, '') AS driver_vehicle_plate,
+               j.accepted_at, j.picked_up_at, j.delivered_at
+        FROM bhuz_services s
+        LEFT JOIN bhuz_delivery_jobs j
+          ON j.source_type = 'PACKAGE' AND j.source_id = s.id
+        LEFT JOIN bhuz_drivers d
+          ON d.id = COALESCE(j.driver_id, s.driver_id)
+        WHERE LOWER(s.customer_email) = LOWER($1)
+        ORDER BY s.created_at DESC
+        LIMIT 100
+        `,
+        [customerEmail]
+      );
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        services: result.rows.map((row) => ({
+          ...mapearServicio(row),
+          driverId: row.assigned_driver_id || '',
+          driverName: row.assigned_driver_name || '',
+          driverPhone: row.assigned_driver_phone || '',
+          driverVehicleType: row.driver_vehicle_type || '',
+          driverVehiclePlate: row.driver_vehicle_plate || '',
+          deliveryJobStatus: row.delivery_job_status || '',
+          acceptedAt: row.accepted_at,
+          pickedUpAt: row.picked_up_at,
+          deliveredAt: row.delivered_at
+        }))
+      });
+    } catch (error) {
+      console.error("Error consultando historial de envíos:", error.message);
+      return res.status(500).json({ ok: false, message: "No se pudo cargar el historial de envíos", error: error.message });
+    }
+  });
+
+  /* ======================================================
      GET /api/services/:id
      Consulta un servicio.
   ====================================================== */

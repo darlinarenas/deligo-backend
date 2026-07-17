@@ -95,15 +95,61 @@ router.get("/datos", async (req, res) => {
     const users = await getUsersFromPostgres();
     const restaurants = await getRestaurantsFromPostgres();
     const orders = await getOrdersFromPostgres();
+    const servicesResult = await pool.query(`
+      SELECT
+        s.*,
+        COALESCE(j.status, '') AS delivery_job_status,
+        COALESCE(j.driver_id, s.driver_id, '') AS assigned_driver_id,
+        COALESCE(d.full_name, s.driver_name, '') AS assigned_driver_name,
+        COALESCE(d.phone, s.driver_phone, '') AS assigned_driver_phone,
+        COALESCE(d.vehicle_type, '') AS driver_vehicle_type,
+        COALESCE(d.vehicle_plate, '') AS driver_vehicle_plate,
+        j.accepted_at, j.picked_up_at, j.delivered_at
+      FROM bhuz_services s
+      LEFT JOIN bhuz_delivery_jobs j
+        ON j.source_type = 'PACKAGE' AND j.source_id = s.id
+      LEFT JOIN bhuz_drivers d
+        ON d.id = COALESCE(j.driver_id, s.driver_id)
+      ORDER BY s.created_at DESC
+      LIMIT 500
+    `);
+
+    const services = servicesResult.rows.map((row) => ({
+      id: row.id,
+      serviceType: row.service_type,
+      customerEmail: row.customer_email || '',
+      customerName: row.customer_name || '',
+      customerPhone: row.customer_phone || '',
+      receiverName: row.receiver_name || '',
+      receiverPhone: row.receiver_phone || '',
+      pickupAddress: row.pickup_address || '',
+      pickupReference: row.pickup_reference || '',
+      deliveryAddress: row.delivery_address || '',
+      deliveryReference: row.delivery_reference || '',
+      packageDescription: row.package_description || '',
+      packageSize: row.package_size || '',
+      distanceKm: Number(row.distance_km || 0),
+      totalAmount: Number(row.total_amount || 0),
+      paymentStatus: row.payment_status || '',
+      paymentMethod: row.payment_method || '',
+      status: row.status || '',
+      driverId: row.assigned_driver_id || '',
+      driverName: row.assigned_driver_name || '',
+      driverPhone: row.assigned_driver_phone || '',
+      driverVehicleType: row.driver_vehicle_type || '',
+      driverVehiclePlate: row.driver_vehicle_plate || '',
+      deliveryJobStatus: row.delivery_job_status || '',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      acceptedAt: row.accepted_at,
+      pickedUpAt: row.picked_up_at,
+      deliveredAt: row.delivered_at
+    }));
 
     return res.json({
       ok: true,
       source: "postgres",
-      data: {
-        users,
-        restaurants,
-        orders
-      }
+      data: { users, restaurants, orders, services }
     });
   } catch (error) {
     console.error("Error leyendo datos admin desde PostgreSQL:", error.message);
