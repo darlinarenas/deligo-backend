@@ -146,86 +146,94 @@ function crearRutasPedidos(dependencias) {
       await client.query("BEGIN");
 
       const result = await client.query(
-        `UPDATE orders
-         SET status = $1,
-             ready_at = CASE WHEN $1='listo' THEN NOW() ELSE ready_at END,
-             updated_at = NOW()
-         WHERE id = $2
-         RETURNING *`,
+        `
+        UPDATE orders
+        SET
+          status = $1,
+          ready_at = CASE WHEN $1 = 'listo' THEN COALESCE(ready_at, NOW()) ELSE ready_at END,
+          updated_at = NOW()
+        WHERE id = $2
+        RETURNING *
+        `,
         [normalizedStatus, orderId]
       );
 
-      const row = result.rows[0];
-      if (!row) {
+      const orderRow = result.rows[0];
+      if (!orderRow) {
         await client.query("ROLLBACK");
         return res.status(404).json({ ok: false, message: "Pedido no encontrado" });
       }
 
-      /*
-        Restaurante → repartidor.
-        Desde que el restaurante acepta/prepara/lista el pedido, se garantiza
-        una tarea abierta para los repartidores. ON CONFLICT evita duplicados.
-      */
+      let deliveryJob = null;
       if (["aceptado", "preparando", "listo"].includes(normalizedStatus)) {
-        const earning = Math.max(1.5, Math.round(Number(row.total || 0) * 0.10 * 100) / 100);
+        const restaurantResult = await client.query(
+          `SELECT address FROM restaurants WHERE id = $1 OR LOWER(email) = LOWER($2) LIMIT 1`,
+          [orderRow.restaurant_id || "", orderRow.restaurant_email || ""]
+        );
+        const restaurantAddress = restaurantResult.rows[0]?.address || "";
+        const earning = Number(orderRow.driver_earning || 0) || Math.max(1.5, Math.round(Number(orderRow.total || 0) * 0.10 * 100) / 100);
+        const jobId = `job_${Date.now()}_${Math.random().toString(16).slice(2, 12)}`;
 
-        await client.query(
-          `INSERT INTO bhuz_delivery_jobs (
-             id, source_type, source_id, status,
-             pickup_name, pickup_address,
-             delivery_name, delivery_address, delivery_reference,
-             delivery_latitude, delivery_longitude,
-             service_total, driver_earning, currency, payment_method,
-             payment_received_by, estimated_pickup_at, created_at, updated_at
-           )
-           VALUES (
-             'job_' || $1, 'FOOD_ORDER', $1, 'PENDING_ASSIGNMENT',
-             COALESCE(NULLIF($2,''), 'Restaurante'), COALESCE(NULLIF($3,''), 'Dirección del restaurante pendiente'),
-             COALESCE(NULLIF($4,''), 'Cliente'), COALESCE(NULLIF($5,''), $6, 'Dirección de entrega pendiente'), $7,
-             NULLIF($8,'')::numeric, NULLIF($9,'')::numeric,
-             COALESCE($10,0), $11, 'USD', $12, 'BHUZ',
-             CASE WHEN $13='listo' THEN NOW() ELSE NULL END, NOW(), NOW()
-           )
-           ON CONFLICT (source_type, source_id) DO UPDATE SET
-             status = CASE
-               WHEN bhuz_delivery_jobs.driver_id IS NULL
-                AND bhuz_delivery_jobs.status NOT IN ('DELIVERED','CANCELLED')
-               THEN 'PENDING_ASSIGNMENT'
-               ELSE bhuz_delivery_jobs.status
-             END,
-             pickup_name=EXCLUDED.pickup_name,
-             pickup_address=EXCLUDED.pickup_address,
-             delivery_name=EXCLUDED.delivery_name,
-             delivery_address=EXCLUDED.delivery_address,
-             delivery_reference=EXCLUDED.delivery_reference,
-             delivery_latitude=EXCLUDED.delivery_latitude,
-             delivery_longitude=EXCLUDED.delivery_longitude,
-             service_total=EXCLUDED.service_total,
-             driver_earning=EXCLUDED.driver_earning,
-             payment_method=EXCLUDED.payment_method,
-             estimated_pickup_at=COALESCE(EXCLUDED.estimated_pickup_at,bhuz_delivery_jobs.estimated_pickup_at),
-             updated_at=NOW()
-           RETURNING id`,
+        const jobResult = await client.query(
+          `
+          INSERT INTO bhuz_delivery_jobs (
+            id, source_type, source_id, assignment_mode, status, priority,
+            pickup_name, pickup_address,
+            delivery_name, delivery_address, delivery_reference,
+            delivery_latitude, delivery_longitude,
+            service_total, driver_earning, currency,
+            payment_method, payment_received_by, estimated_pickup_at,
+            created_at, updated_at
+          )
+          VALUES (
+            $1, 'FOOD_ORDER', $2, 'OPEN', 'PENDING_ASSIGNMENT', 0,
+            $3, $4,
+            $5, $6, $7,
+            $8, $9,
+            $10, $11, 'USD',
+            $12, 'BHUZ', CASE WHEN $13 = 'listo' THEN NOW() ELSE NULL END,
+            NOW(), NOW()
+          )
+          ON CONFLICT (source_type, source_id) DO UPDATE SET
+            status = CASE
+              WHEN bhuz_delivery_jobs.status IN ('DELIVERED','CANCELLED') THEN bhuz_delivery_jobs.status
+              ELSE bhuz_delivery_jobs.status
+            END,
+            pickup_name = EXCLUDED.pickup_name,
+            pickup_address = EXCLUDED.pickup_address,
+            delivery_name = EXCLUDED.delivery_name,
+            delivery_address = EXCLUDED.delivery_address,
+            delivery_reference = EXCLUDED.delivery_reference,
+            delivery_latitude = EXCLUDED.delivery_latitude,
+            delivery_longitude = EXCLUDED.delivery_longitude,
+            service_total = EXCLUDED.service_total,
+            driver_earning = EXCLUDED.driver_earning,
+            payment_method = EXCLUDED.payment_method,
+            estimated_pickup_at = CASE WHEN $13 = 'listo' THEN NOW() ELSE bhuz_delivery_jobs.estimated_pickup_at END,
+            updated_at = NOW()
+          RETURNING *
+          `,
           [
-            row.id, row.restaurant_name, row.restaurant_address,
-            row.customer_name, row.delivery_address, row.customer_address,
-            row.delivery_reference, String(row.latitude || ""), String(row.longitude || ""),
-            Number(row.total || 0), earning, row.payment_method || "", normalizedStatus
+            jobId,
+            orderRow.id,
+            orderRow.restaurant_name || "Restaurante",
+            restaurantAddress,
+            orderRow.customer_name || "Cliente",
+            orderRow.delivery_address || orderRow.customer_address || "",
+            orderRow.delivery_reference || "",
+            orderRow.latitude || null,
+            orderRow.longitude || null,
+            Number(orderRow.total || 0),
+            earning,
+            orderRow.payment_method || "",
+            normalizedStatus
           ]
         );
 
-        const job = await client.query(
-          `SELECT id FROM bhuz_delivery_jobs WHERE source_type='FOOD_ORDER' AND source_id=$1 LIMIT 1`,
-          [row.id]
-        );
+        deliveryJob = jobResult.rows[0] || null;
         await client.query(
-          `UPDATE orders
-           SET delivery_status=CASE WHEN driver_id IS NULL THEN 'PENDING_ASSIGNMENT' ELSE delivery_status END,
-               delivery_job_id=COALESCE(delivery_job_id,$2),
-               driver_earning=CASE WHEN COALESCE(driver_earning,0)>0 THEN driver_earning ELSE $3 END,
-               updated_at=NOW()
-           WHERE id=$1`,
-          [row.id, job.rows[0]?.id || null, earning]
+          `UPDATE orders SET delivery_status = CASE WHEN delivery_status IN ('ASSIGNED','GOING_TO_PICKUP','PICKED_UP','GOING_TO_DELIVERY','DELIVERED') THEN delivery_status ELSE 'PENDING_ASSIGNMENT' END, delivery_job_id = $2, driver_earning = $3, updated_at = NOW() WHERE id = $1`,
+          [orderRow.id, deliveryJob?.id || null, earning]
         );
       }
 
@@ -236,7 +244,8 @@ function crearRutasPedidos(dependencias) {
         ok: true,
         source: "postgres",
         message: "Estado actualizado correctamente",
-        order
+        order,
+        deliveryJob
       });
     } catch (error) {
       await client.query("ROLLBACK");
