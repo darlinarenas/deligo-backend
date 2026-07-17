@@ -27,6 +27,7 @@ const crearRutasDirecciones = require("./routes/direcciones.routes");
 const crearRutasServices = require("./routes/services.routes");
 const crearRutasDrivers = require("./routes/drivers.routes");
 const crearRutasTracking = require("./routes/tracking.routes");
+const crearRutasRatings = require("./routes/ratings.routes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -2706,6 +2707,9 @@ app.use("/orders", crearRutasPedidos({
    - PATCH /admin/restaurantes/:id/comision
    - La lógica fue movida a routes/admin.routes.js
 ====================================================== */
+
+app.use("/api/ratings", crearRutasRatings({ pool }));
+
 app.use("/admin", crearRutasAdmin({
   pool,
   normalizeEmail,

@@ -642,20 +642,53 @@ router.get("/drivers/:id", async (req, res) => {
     const result = await pool.query(`SELECT * FROM bhuz_drivers WHERE id=$1 LIMIT 1`, [req.params.id]);
     const driver = result.rows[0];
     if (!driver) return res.status(404).json({ ok:false, message:"Repartidor no encontrado." });
-    const summary = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE j.status='DELIVERED')::int AS completed_jobs,
-        COALESCE(SUM(j.driver_earning) FILTER (WHERE j.status='DELIVERED'),0) AS total_earnings,
-        (SELECT COUNT(*)::int FROM bhuz_driver_incidents i WHERE i.driver_id=$1 AND i.status IN ('OPEN','REVIEWING')) AS open_incidents,
-        (SELECT COUNT(*)::int FROM bhuz_driver_settlements s WHERE s.driver_id=$1 AND s.status IN ('DRAFT','PENDING','PARTIALLY_PAID','DISPUTED')) AS pending_settlements
-      FROM bhuz_delivery_jobs j WHERE j.driver_id=$1
-    `, [req.params.id]);
-    const row=summary.rows[0]||{};
-    return res.json({ok:true,driver:mapAdminDriver(driver),summary:{completedJobs:Number(row.completed_jobs||0),totalEarnings:Number(row.total_earnings||0),openIncidents:Number(row.open_incidents||0),pendingSettlements:Number(row.pending_settlements||0)}});
+
+    const [summaryQ,jobsQ,settlementsQ,requestsQ,ratingsQ,incidentsQ] = await Promise.all([
+      pool.query(`SELECT
+        COUNT(*)::int total_jobs,
+        COUNT(*) FILTER(WHERE status='DELIVERED')::int completed_jobs,
+        COUNT(*) FILTER(WHERE status='CANCELLED')::int cancelled_jobs,
+        COUNT(*) FILTER(WHERE status NOT IN ('DELIVERED','CANCELLED'))::int active_jobs,
+        COUNT(*) FILTER(WHERE source_type='PACKAGE')::int package_jobs,
+        COUNT(*) FILTER(WHERE source_type='FOOD_ORDER')::int food_jobs,
+        COALESCE(SUM(driver_earning) FILTER(WHERE status='DELIVERED'),0) total_earnings,
+        COALESCE(SUM(distance_km) FILTER(WHERE status='DELIVERED'),0) planned_distance_km,
+        COALESCE(SUM(actual_distance_km) FILTER(WHERE status='DELIVERED'),0) actual_distance_km
+        FROM bhuz_delivery_jobs WHERE driver_id=$1`,[req.params.id]),
+      pool.query(`SELECT j.*,COALESCE(s.customer_name,o.customer_name,j.delivery_name) customer_name,
+        COALESCE(s.receiver_name,o.customer_name,j.delivery_name) receiver_name,
+        COALESCE(o.restaurant_name,j.pickup_name) restaurant_name
+        FROM bhuz_delivery_jobs j
+        LEFT JOIN bhuz_services s ON j.source_type='PACKAGE' AND s.id=j.source_id
+        LEFT JOIN orders o ON j.source_type='FOOD_ORDER' AND o.id=j.source_id
+        WHERE j.driver_id=$1 ORDER BY j.created_at DESC LIMIT 300`,[req.params.id]),
+      pool.query(`SELECT * FROM bhuz_driver_settlements WHERE driver_id=$1 ORDER BY period_to DESC LIMIT 100`,[req.params.id]),
+      pool.query(`SELECT * FROM bhuz_driver_settlement_requests WHERE driver_id=$1 ORDER BY requested_at DESC LIMIT 100`,[req.params.id]),
+      pool.query(`SELECT * FROM bhuz_ratings WHERE driver_id=$1 ORDER BY created_at DESC LIMIT 200`,[req.params.id]),
+      pool.query(`SELECT * FROM bhuz_driver_incidents WHERE driver_id=$1 ORDER BY created_at DESC LIMIT 100`,[req.params.id])
+    ]);
+    const row=summaryQ.rows[0]||{};
+    const ratingSummary=ratingsQ.rows.reduce((a,r)=>{if(r.driver_rating){a.total++;a.sum+=Number(r.driver_rating)}return a},{total:0,sum:0});
+    return res.json({ok:true,driver:mapAdminDriver(driver),summary:{
+      totalJobs:Number(row.total_jobs||0),completedJobs:Number(row.completed_jobs||0),cancelledJobs:Number(row.cancelled_jobs||0),activeJobs:Number(row.active_jobs||0),packageJobs:Number(row.package_jobs||0),foodJobs:Number(row.food_jobs||0),totalEarnings:Number(row.total_earnings||0),plannedDistanceKm:Number(row.planned_distance_km||0),actualDistanceKm:Number(row.actual_distance_km||0),ratingAverage:ratingSummary.total?ratingSummary.sum/ratingSummary.total:Number(driver.rating||0),ratingCount:ratingSummary.total
+    },jobs:jobsQ.rows,settlements:settlementsQ.rows,settlementRequests:requestsQ.rows,ratings:ratingsQ.rows,incidents:incidentsQ.rows});
   } catch (error) {
     console.error("Error leyendo repartidor:", error.message);
-    return res.status(500).json({ok:false,message:"No se pudo cargar la ficha del repartidor."});
+    return res.status(500).json({ok:false,message:"No se pudo cargar la ficha completa del repartidor."});
   }
+});
+
+router.patch("/drivers/:id", async(req,res)=>{
+  const b=req.body||{};
+  try {
+    const q=await pool.query(`UPDATE bhuz_drivers SET
+      full_name=COALESCE(NULLIF($2,''),full_name),phone=COALESCE(NULLIF($3,''),phone),identity_document=COALESCE(NULLIF($4,''),identity_document),
+      birth_date=COALESCE(NULLIF($5,'')::date,birth_date),address=COALESCE(NULLIF($6,''),address),country_code=COALESCE(NULLIF($7,''),country_code),city=COALESCE(NULLIF($8,''),city),zone=COALESCE(NULLIF($9,''),zone),
+      vehicle_type=COALESCE(NULLIF($10,''),vehicle_type),vehicle_brand=COALESCE(NULLIF($11,''),vehicle_brand),vehicle_model=COALESCE(NULLIF($12,''),vehicle_model),vehicle_plate=COALESCE(NULLIF($13,''),vehicle_plate),vehicle_color=COALESCE(NULLIF($14,''),vehicle_color),emergency_contact=COALESCE(NULLIF($15,''),emergency_contact),updated_at=NOW()
+      WHERE id=$1 RETURNING *`,[req.params.id,b.fullName||'',b.phone||'',b.identityDocument||'',b.birthDate||'',b.address||'',b.countryCode||'',b.city||'',b.zone||'',b.vehicleType||'',b.vehicleBrand||'',b.vehicleModel||'',b.vehiclePlate||'',b.vehicleColor||'',b.emergencyContact||'']);
+    if(!q.rows[0]) return res.status(404).json({ok:false,message:'Repartidor no encontrado.'});
+    res.json({ok:true,message:'Datos del repartidor actualizados.',driver:mapAdminDriver(q.rows[0])});
+  } catch(error){console.error(error);res.status(500).json({ok:false,message:'No se pudieron actualizar los datos del repartidor.'});}
 });
 
 router.patch("/drivers/:id/status", async (req, res) => {
@@ -687,89 +720,31 @@ router.patch("/drivers/:id/status", async (req, res) => {
 router.get("/services", async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT
-        s.id,
-        s.service_type,
-        s.customer_email,
-        s.customer_name,
-        s.customer_phone,
-        s.receiver_name,
-        s.receiver_phone,
-        s.pickup_address,
-        s.pickup_reference,
-        s.delivery_address,
-        s.delivery_reference,
-        s.package_description,
-        s.package_size,
-        s.distance_km,
-        s.total_amount,
-        s.payment_status,
-        s.payment_method,
-        s.status,
-        s.driver_id AS service_driver_id,
-        s.driver_name AS service_driver_name,
-        s.driver_phone AS service_driver_phone,
-        s.created_at,
-        s.updated_at,
-        j.status AS delivery_job_status,
-        j.driver_id AS job_driver_id,
-        j.assigned_at,
-        j.picked_up_at,
-        j.delivered_at,
-        d.full_name AS driver_full_name,
-        d.phone AS driver_phone,
-        d.vehicle_type AS driver_vehicle_type,
-        d.vehicle_plate AS driver_vehicle_plate
+      WITH position_steps AS (
+        SELECT delivery_job_id, latitude, longitude,
+          LAG(latitude) OVER(PARTITION BY delivery_job_id ORDER BY created_at) prev_lat,
+          LAG(longitude) OVER(PARTITION BY delivery_job_id ORDER BY created_at) prev_lon
+        FROM bhuz_delivery_positions
+      ), travelled AS (
+        SELECT delivery_job_id, COALESCE(SUM(CASE WHEN prev_lat IS NULL THEN 0 ELSE
+          6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(latitude-prev_lat)/2),2)+COS(RADIANS(prev_lat))*COS(RADIANS(latitude))*POWER(SIN(RADIANS(longitude-prev_lon)/2),2))) END),0) actual_distance_km
+        FROM position_steps GROUP BY delivery_job_id
+      )
+      SELECT s.*,COALESCE(NULLIF(u.full_name,''),NULLIF(u.name,''),s.customer_name,s.customer_email) registered_sender_name,
+        u.phone registered_sender_phone,j.status delivery_job_status,j.driver_id job_driver_id,j.assigned_at,j.picked_up_at,j.delivered_at,
+        j.distance_km route_distance_km,COALESCE(NULLIF(j.actual_distance_km,0),t.actual_distance_km,0) actual_distance_km,
+        d.full_name driver_full_name,d.phone driver_phone,d.vehicle_type driver_vehicle_type,d.vehicle_plate driver_vehicle_plate
       FROM bhuz_services s
-      LEFT JOIN bhuz_delivery_jobs j
-        ON j.source_type = 'PACKAGE' AND j.source_id = s.id
-      LEFT JOIN bhuz_drivers d
-        ON d.id = COALESCE(j.driver_id, s.driver_id)
-      ORDER BY s.created_at DESC
-      LIMIT 500
-    `);
-
-    const services = result.rows.map((row) => ({
-      id: row.id,
-      serviceType: row.service_type || "PACKAGE",
-      customerEmail: row.customer_email || "",
-      customerName: row.customer_name || "",
-      customerPhone: row.customer_phone || "",
-      receiverName: row.receiver_name || "",
-      receiverPhone: row.receiver_phone || "",
-      pickupAddress: row.pickup_address || "",
-      pickupReference: row.pickup_reference || "",
-      deliveryAddress: row.delivery_address || "",
-      deliveryReference: row.delivery_reference || "",
-      packageDescription: row.package_description || "",
-      packageSize: row.package_size || "",
-      distanceKm: Number(row.distance_km || 0),
-      totalAmount: Number(row.total_amount || 0),
-      paymentStatus: row.payment_status || "",
-      paymentMethod: row.payment_method || "",
-      status: row.status || "",
-      driverId: row.job_driver_id || row.service_driver_id || "",
-      driverName: row.driver_full_name || row.service_driver_name || "",
-      driverPhone: row.driver_phone || row.service_driver_phone || "",
-      driverVehicleType: row.driver_vehicle_type || "",
-      driverVehiclePlate: row.driver_vehicle_plate || "",
-      deliveryJobStatus: row.delivery_job_status || "",
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      acceptedAt: row.assigned_at,
-      pickedUpAt: row.picked_up_at,
-      deliveredAt: row.delivered_at
+      LEFT JOIN users u ON LOWER(u.email)=LOWER(s.customer_email)
+      LEFT JOIN bhuz_delivery_jobs j ON j.source_type='PACKAGE' AND j.source_id=s.id
+      LEFT JOIN travelled t ON t.delivery_job_id=j.id
+      LEFT JOIN bhuz_drivers d ON d.id=COALESCE(j.driver_id,s.driver_id)
+      ORDER BY s.created_at DESC LIMIT 500`);
+    const services=result.rows.map(row=>({
+      id:row.id,serviceType:row.service_type||'PACKAGE',customerEmail:row.customer_email||'',customerName:row.registered_sender_name||row.customer_name||'',customerPhone:row.registered_sender_phone||row.customer_phone||'',receiverName:row.receiver_name||'',receiverPhone:row.receiver_phone||'',pickupAddress:row.pickup_address||'',pickupReference:row.pickup_reference||'',deliveryAddress:row.delivery_address||'',deliveryReference:row.delivery_reference||'',packageDescription:row.package_description||'',packageSize:row.package_size||'',distanceKm:Number(row.distance_km||row.route_distance_km||0),routeDistanceKm:Number(row.route_distance_km||row.distance_km||0),actualDistanceKm:Number(row.actual_distance_km||0),totalAmount:Number(row.total_amount||0),paymentStatus:row.payment_status||'',paymentMethod:row.payment_method||'',status:row.status||'',driverId:row.job_driver_id||row.driver_id||'',driverName:row.driver_full_name||row.driver_name||'',driverPhone:row.driver_phone||'',driverVehicleType:row.driver_vehicle_type||'',driverVehiclePlate:row.driver_vehicle_plate||'',deliveryJobStatus:row.delivery_job_status||'',createdAt:row.created_at,updatedAt:row.updated_at,acceptedAt:row.assigned_at,pickedUpAt:row.picked_up_at,deliveredAt:row.delivered_at
     }));
-
-    return res.json({ ok: true, source: "postgres", services });
-  } catch (error) {
-    console.error("Error cargando paquetes administrativos:", error.message);
-    return res.status(500).json({
-      ok: false,
-      message: "No se pudieron cargar los paquetes.",
-      error: error.message
-    });
-  }
+    return res.json({ok:true,source:'postgres',services});
+  } catch(error){console.error('Error cargando paquetes administrativos:',error.message);return res.status(500).json({ok:false,message:'No se pudieron cargar los paquetes.',error:error.message});}
 });
 
 
