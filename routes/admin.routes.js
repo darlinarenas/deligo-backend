@@ -95,61 +95,15 @@ router.get("/datos", async (req, res) => {
     const users = await getUsersFromPostgres();
     const restaurants = await getRestaurantsFromPostgres();
     const orders = await getOrdersFromPostgres();
-    const servicesResult = await pool.query(`
-      SELECT
-        s.*,
-        COALESCE(j.status, '') AS delivery_job_status,
-        COALESCE(j.driver_id, s.driver_id, '') AS assigned_driver_id,
-        COALESCE(d.full_name, s.driver_name, '') AS assigned_driver_name,
-        COALESCE(d.phone, s.driver_phone, '') AS assigned_driver_phone,
-        COALESCE(d.vehicle_type, '') AS driver_vehicle_type,
-        COALESCE(d.vehicle_plate, '') AS driver_vehicle_plate,
-        j.accepted_at, j.picked_up_at, j.delivered_at
-      FROM bhuz_services s
-      LEFT JOIN bhuz_delivery_jobs j
-        ON j.source_type = 'PACKAGE' AND j.source_id = s.id
-      LEFT JOIN bhuz_drivers d
-        ON d.id = COALESCE(j.driver_id, s.driver_id)
-      ORDER BY s.created_at DESC
-      LIMIT 500
-    `);
-
-    const services = servicesResult.rows.map((row) => ({
-      id: row.id,
-      serviceType: row.service_type,
-      customerEmail: row.customer_email || '',
-      customerName: row.customer_name || '',
-      customerPhone: row.customer_phone || '',
-      receiverName: row.receiver_name || '',
-      receiverPhone: row.receiver_phone || '',
-      pickupAddress: row.pickup_address || '',
-      pickupReference: row.pickup_reference || '',
-      deliveryAddress: row.delivery_address || '',
-      deliveryReference: row.delivery_reference || '',
-      packageDescription: row.package_description || '',
-      packageSize: row.package_size || '',
-      distanceKm: Number(row.distance_km || 0),
-      totalAmount: Number(row.total_amount || 0),
-      paymentStatus: row.payment_status || '',
-      paymentMethod: row.payment_method || '',
-      status: row.status || '',
-      driverId: row.assigned_driver_id || '',
-      driverName: row.assigned_driver_name || '',
-      driverPhone: row.assigned_driver_phone || '',
-      driverVehicleType: row.driver_vehicle_type || '',
-      driverVehiclePlate: row.driver_vehicle_plate || '',
-      deliveryJobStatus: row.delivery_job_status || '',
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      acceptedAt: row.accepted_at,
-      pickedUpAt: row.picked_up_at,
-      deliveredAt: row.delivered_at
-    }));
 
     return res.json({
       ok: true,
       source: "postgres",
-      data: { users, restaurants, orders, services }
+      data: {
+        users,
+        restaurants,
+        orders
+      }
     });
   } catch (error) {
     console.error("Error leyendo datos admin desde PostgreSQL:", error.message);
@@ -720,6 +674,101 @@ router.patch("/drivers/:id/status", async (req, res) => {
   } catch(error) {
     console.error("Error cambiando estado de repartidor:",error.message);
     return res.status(500).json({ok:false,message:"No se pudo actualizar el estado del repartidor."});
+  }
+});
+
+
+/* ======================================================
+   ADMIN PAQUETES - ENDPOINT INDEPENDIENTE
+   Importante: esta consulta NO forma parte de /admin/datos.
+   Así, si el módulo de paquetes falla, no rompe Resumen,
+   Usuarios, Restaurantes, Pedidos ni Comisiones.
+====================================================== */
+router.get("/services", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        s.id,
+        s.service_type,
+        s.customer_email,
+        s.customer_name,
+        s.customer_phone,
+        s.receiver_name,
+        s.receiver_phone,
+        s.pickup_address,
+        s.pickup_reference,
+        s.delivery_address,
+        s.delivery_reference,
+        s.package_description,
+        s.package_size,
+        s.distance_km,
+        s.total_amount,
+        s.payment_status,
+        s.payment_method,
+        s.status,
+        s.driver_id AS service_driver_id,
+        s.driver_name AS service_driver_name,
+        s.driver_phone AS service_driver_phone,
+        s.created_at,
+        s.updated_at,
+        j.status AS delivery_job_status,
+        j.driver_id AS job_driver_id,
+        j.assigned_at,
+        j.picked_up_at,
+        j.delivered_at,
+        d.full_name AS driver_full_name,
+        d.phone AS driver_phone,
+        d.vehicle_type AS driver_vehicle_type,
+        d.vehicle_plate AS driver_vehicle_plate
+      FROM bhuz_services s
+      LEFT JOIN bhuz_delivery_jobs j
+        ON j.source_type = 'PACKAGE' AND j.source_id = s.id
+      LEFT JOIN bhuz_drivers d
+        ON d.id = COALESCE(j.driver_id, s.driver_id)
+      ORDER BY s.created_at DESC
+      LIMIT 500
+    `);
+
+    const services = result.rows.map((row) => ({
+      id: row.id,
+      serviceType: row.service_type || "PACKAGE",
+      customerEmail: row.customer_email || "",
+      customerName: row.customer_name || "",
+      customerPhone: row.customer_phone || "",
+      receiverName: row.receiver_name || "",
+      receiverPhone: row.receiver_phone || "",
+      pickupAddress: row.pickup_address || "",
+      pickupReference: row.pickup_reference || "",
+      deliveryAddress: row.delivery_address || "",
+      deliveryReference: row.delivery_reference || "",
+      packageDescription: row.package_description || "",
+      packageSize: row.package_size || "",
+      distanceKm: Number(row.distance_km || 0),
+      totalAmount: Number(row.total_amount || 0),
+      paymentStatus: row.payment_status || "",
+      paymentMethod: row.payment_method || "",
+      status: row.status || "",
+      driverId: row.job_driver_id || row.service_driver_id || "",
+      driverName: row.driver_full_name || row.service_driver_name || "",
+      driverPhone: row.driver_phone || row.service_driver_phone || "",
+      driverVehicleType: row.driver_vehicle_type || "",
+      driverVehiclePlate: row.driver_vehicle_plate || "",
+      deliveryJobStatus: row.delivery_job_status || "",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      acceptedAt: row.assigned_at,
+      pickedUpAt: row.picked_up_at,
+      deliveredAt: row.delivered_at
+    }));
+
+    return res.json({ ok: true, source: "postgres", services });
+  } catch (error) {
+    console.error("Error cargando paquetes administrativos:", error.message);
+    return res.status(500).json({
+      ok: false,
+      message: "No se pudieron cargar los paquetes.",
+      error: error.message
+    });
   }
 });
 
