@@ -232,8 +232,12 @@ module.exports = function crearRutasDrivers({ pool }) {
     const allowed={ASSIGNED:['GOING_TO_PICKUP'],GOING_TO_PICKUP:['ARRIVED_AT_PICKUP','PICKED_UP'],ARRIVED_AT_PICKUP:['PICKED_UP'],PICKED_UP:['GOING_TO_DELIVERY'],GOING_TO_DELIVERY:['ARRIVED_AT_DELIVERY','DELIVERED'],ARRIVED_AT_DELIVERY:['DELIVERED']};
     const client=await pool.connect(); try {await client.query('BEGIN'); const job=(await client.query('SELECT * FROM bhuz_delivery_jobs WHERE id=$1 AND driver_id=$2 FOR UPDATE',[req.params.jobId,req.params.driverId])).rows[0];
       if(!job) throw new Error('Tarea no encontrada.'); if(!(allowed[job.status]||[]).includes(next)) { await client.query('ROLLBACK'); return res.status(409).json({ok:false,message:`Transición inválida: ${job.status} → ${next}`}); }
+      if(job.source_type==='PACKAGE' && next==='DELIVERED') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ok:false,message:'Para cerrar un paquete debes ingresar el código de 6 dígitos del receptor.'});
+      }
       const delivered=next==='DELIVERED'; const q=await client.query(`UPDATE bhuz_delivery_jobs SET status=$3,picked_up_at=CASE WHEN $3='PICKED_UP' THEN NOW() ELSE picked_up_at END,delivered_at=CASE WHEN $3='DELIVERED' THEN NOW() ELSE delivered_at END,updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId,next]);
-      if(job.source_type==='PACKAGE') { const sm={GOING_TO_PICKUP:'GOING_TO_PICKUP',PICKED_UP:'PACKAGE_PICKED',GOING_TO_DELIVERY:'GOING_TO_DELIVERY',DELIVERED:'DELIVERED'}; if(sm[next]) await client.query('UPDATE bhuz_services SET status=$2,updated_at=NOW() WHERE id=$1',[job.source_id,sm[next]]); }
+      if(job.source_type==='PACKAGE') { const sm={GOING_TO_PICKUP:'GOING_TO_PICKUP',PICKED_UP:'PACKAGE_PICKED',GOING_TO_DELIVERY:'GOING_TO_DELIVERY'}; if(sm[next]) await client.query('UPDATE bhuz_services SET status=$2,updated_at=NOW() WHERE id=$1',[job.source_id,sm[next]]); }
       if(job.source_type==='FOOD_ORDER') await client.query('UPDATE orders SET delivery_status=$2,status=CASE WHEN $2=\'DELIVERED\' THEN \'entregado\' ELSE status END,updated_at=NOW() WHERE id=$1',[job.source_id,next]);
       if(delivered){
         await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
@@ -242,6 +246,32 @@ module.exports = function crearRutasDrivers({ pool }) {
       }
       await client.query('COMMIT');res.json({ok:true,job:q.rows[0]});
     } catch(err){await client.query('ROLLBACK');console.error(err);res.status(500).json({ok:false,message:err.message||'No se pudo cambiar el estado.'});} finally{client.release();}
+  });
+
+
+  r.post('/:driverId/jobs/:jobId/confirm-delivery', async(req,res)=>{
+    const deliveryCode=String(req.body?.deliveryCode||req.body?.code||'').replace(/\D/g,'').slice(0,6);
+    if(deliveryCode.length!==6) return res.status(400).json({ok:false,message:'Ingresa los 6 dígitos del código de entrega.'});
+    const client=await pool.connect();
+    try{
+      await client.query('BEGIN');
+      const job=(await client.query('SELECT * FROM bhuz_delivery_jobs WHERE id=$1 AND driver_id=$2 FOR UPDATE',[req.params.jobId,req.params.driverId])).rows[0];
+      if(!job){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Tarea no encontrada.'});}
+      if(job.source_type!=='PACKAGE'){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este servicio no requiere código de paquete.'});}
+      if(!['GOING_TO_DELIVERY','ARRIVED_AT_DELIVERY'].includes(job.status)){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Primero debes llegar al destino para confirmar la entrega.'});}
+      const service=(await client.query('SELECT * FROM bhuz_services WHERE id=$1 FOR UPDATE',[job.source_id])).rows[0];
+      if(!service){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Envío no encontrado.'});}
+      if(service.delivery_code_used===true){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este código ya fue utilizado.'});}
+      if(String(service.delivery_code||'').trim()!==deliveryCode){await client.query('ROLLBACK');return res.status(403).json({ok:false,message:'Código de entrega incorrecto.'});}
+      await client.query(`UPDATE bhuz_services SET status='DELIVERED',delivery_code_used=TRUE,updated_at=NOW() WHERE id=$1`,[job.source_id]);
+      const q=await client.query(`UPDATE bhuz_delivery_jobs SET status='DELIVERED',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId]);
+      await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
+      if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
+      await client.query(`UPDATE bhuz_drivers SET operational_status='AVAILABLE',is_available=TRUE,completed_deliveries=completed_deliveries+1,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
+      await client.query('COMMIT');
+      res.json({ok:true,message:'Entrega confirmada correctamente.',job:q.rows[0]});
+    }catch(err){await client.query('ROLLBACK');console.error(err);res.status(500).json({ok:false,message:err.message||'No se pudo confirmar la entrega.'});}
+    finally{client.release();}
   });
 
   r.post('/:driverId/incidents', async(req,res)=>{ try { const q=await pool.query(`INSERT INTO bhuz_driver_incidents(id,driver_id,delivery_job_id,incident_type,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[id('inc'),req.params.driverId,req.body?.jobId||null,req.body?.incidentType||'OTHER',req.body?.description||'',req.body?.evidenceUrl||null]);res.status(201).json({ok:true,incident:q.rows[0]}); }catch(err){res.status(500).json({ok:false,message:'No se pudo registrar la incidencia.'});} });
