@@ -713,6 +713,39 @@ router.patch("/drivers/:id/status", async (req, res) => {
 });
 
 
+router.delete("/drivers/:id", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const driverQ = await client.query(`SELECT id, full_name FROM bhuz_drivers WHERE id=$1 FOR UPDATE`, [req.params.id]);
+    if (!driverQ.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ok:false,message:"Repartidor no encontrado."});
+    }
+    const usageQ = await client.query(`SELECT
+      (SELECT COUNT(*) FROM bhuz_delivery_jobs WHERE driver_id=$1)::int jobs,
+      (SELECT COUNT(*) FROM bhuz_driver_ledger WHERE driver_id=$1)::int ledger,
+      (SELECT COUNT(*) FROM bhuz_driver_settlements WHERE driver_id=$1)::int settlements,
+      (SELECT COUNT(*) FROM bhuz_driver_settlement_requests WHERE driver_id=$1)::int requests`, [req.params.id]);
+    const usage = usageQ.rows[0] || {};
+    const totalUsage = Number(usage.jobs||0)+Number(usage.ledger||0)+Number(usage.settlements||0)+Number(usage.requests||0);
+    if (totalUsage > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ok:false,message:"Este repartidor tiene servicios o movimientos registrados y no se puede eliminar. Para conservar el historial, utiliza Bloquear."});
+    }
+    await client.query(`DELETE FROM bhuz_drivers WHERE id=$1`, [req.params.id]);
+    await client.query("COMMIT");
+    return res.json({ok:true,message:"Repartidor eliminado correctamente."});
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error eliminando repartidor:", error.message);
+    return res.status(500).json({ok:false,message:"No se pudo eliminar el repartidor."});
+  } finally {
+    client.release();
+  }
+});
+
+
 /* ======================================================
    ADMIN PAQUETES - ENDPOINT INDEPENDIENTE
    Importante: esta consulta NO forma parte de /admin/datos.
