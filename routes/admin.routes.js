@@ -617,6 +617,9 @@ function mapAdminDriver(row) {
     lastLongitude: row.last_longitude,
     lastLocationAt: row.last_location_at,
     lastSeenAt: row.last_seen_at,
+    sessionActive: !!row.session_active,
+    inactivityPromptAt: row.inactivity_prompt_at,
+    inactivityDeadlineAt: row.inactivity_deadline_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   } : null;
