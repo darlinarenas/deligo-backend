@@ -2674,7 +2674,8 @@ app.use("/api/drivers", crearRutasDrivers({ pool }));
 app.use("/api/tracking", crearRutasTracking({ pool }));
 
 app.use("/api/services", crearRutasServices({
-  pool
+  pool,
+  getSessionUser
 }));
 
 /* ======================================================

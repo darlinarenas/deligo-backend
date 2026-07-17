@@ -27,7 +27,7 @@ const {
   buildReceiverConfirmUrl
 } = require("../utils/services.helpers");
 
-function crearRutasServices({ pool }) {
+function crearRutasServices({ pool, getSessionUser }) {
   const router = express.Router();
 
   const TRANSICIONES = {
@@ -191,7 +191,21 @@ function crearRutasServices({ pool }) {
     );
     const calculatedTotal = calculatedDistanceKm > 0 ? calcularMontoEnvio(calculatedDistanceKm) : 0;
 
-    const customerEmail = normalizarEmail(body.customerEmail || body.senderEmail || body.email || "");
+    let authenticatedUser = null;
+    try {
+      const session = typeof getSessionUser === "function" ? await getSessionUser(req) : null;
+      authenticatedUser = session?.type === "user" ? session.user : null;
+    } catch (_) {}
+
+    const customerEmail = normalizarEmail(
+      authenticatedUser?.email || body.customerEmail || body.senderEmail || body.email || ""
+    );
+    const customerName = limpiarTexto(
+      authenticatedUser?.fullName || authenticatedUser?.full_name || authenticatedUser?.name || body.customerName || body.senderName || ""
+    );
+    const customerPhone = limpiarTexto(
+      authenticatedUser?.phone || authenticatedUser?.telefono || body.customerPhone || body.senderPhone || ""
+    );
     const receiverName = limpiarTexto(body.receiverName || body.contacto || body.recipientName || "");
     const pickupAddress = limpiarTexto(body.pickupAddress || body.origen || "");
     const deliveryAddress = limpiarTexto(body.deliveryAddress || body.destino || "");
@@ -257,8 +271,8 @@ function crearRutasServices({ pool }) {
           limpiarTexto(body.serviceType || "PACKAGE").toUpperCase(),
 
           customerEmail || null,
-          limpiarTexto(body.customerName || body.senderName || ""),
-          limpiarTexto(body.customerPhone || body.senderPhone || ""),
+          customerName,
+          customerPhone,
 
           receiverName,
           limpiarTexto(body.receiverPhone || body.recipientPhone || ""),
@@ -710,11 +724,28 @@ function crearRutasServices({ pool }) {
      Historial de paquetes enviados por un cliente.
   ====================================================== */
   router.get("/customer/history", async (req, res) => {
-    const customerEmail = normalizarEmail(req.query.email || "");
-    const customerName = limpiarTexto(req.query.name || "");
-    const customerPhone = limpiarTexto(req.query.phone || "");
+    let sessionUser = null;
+    try {
+      const session = typeof getSessionUser === "function" ? await getSessionUser(req) : null;
+      sessionUser = session?.type === "user" ? session.user : null;
+    } catch (_) {}
 
-    if (!customerEmail && !customerName && !customerPhone) {
+    const customerEmail = normalizarEmail(
+      sessionUser?.email || req.query.email || ""
+    );
+    const customerName = limpiarTexto(
+      sessionUser?.fullName || sessionUser?.full_name || sessionUser?.name || req.query.name || ""
+    );
+    const customerPhone = limpiarTexto(
+      sessionUser?.phone || sessionUser?.telefono || req.query.phone || ""
+    );
+    const requestedIds = String(req.query.ids || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+
+    if (!customerEmail && !customerName && !customerPhone && !requestedIds.length) {
       return res.status(400).json({ ok: false, message: "Identificación del cliente requerida" });
     }
 
@@ -734,18 +765,26 @@ function crearRutasServices({ pool }) {
           ON j.source_type = 'PACKAGE' AND j.source_id = s.id
         LEFT JOIN bhuz_drivers d
           ON d.id = COALESCE(j.driver_id, s.driver_id)
-        WHERE (NULLIF($1,'') IS NOT NULL AND LOWER(COALESCE(s.customer_email,'')) = LOWER($1))
+        WHERE (NULLIF($1,'') IS NOT NULL AND LOWER(TRIM(COALESCE(s.customer_email,''))) = LOWER(TRIM($1)))
            OR (NULLIF($2,'') IS NOT NULL AND LOWER(TRIM(COALESCE(s.customer_name,''))) = LOWER(TRIM($2)))
            OR (NULLIF($3,'') IS NOT NULL AND regexp_replace(COALESCE(s.customer_phone,''), '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g'))
+           OR (COALESCE(array_length($4::text[], 1), 0) > 0 AND s.id = ANY($4::text[]))
         ORDER BY s.created_at DESC
         LIMIT 100
         `,
-        [customerEmail, customerName, customerPhone]
+        [customerEmail, customerName, customerPhone, requestedIds]
       );
 
       return res.json({
         ok: true,
         source: "postgres",
+        matchedBy: {
+          authenticatedSession: Boolean(sessionUser),
+          email: Boolean(customerEmail),
+          name: Boolean(customerName),
+          phone: Boolean(customerPhone),
+          ids: requestedIds.length
+        },
         services: result.rows.map((row) => ({
           ...mapearServicio(row),
           driverId: row.assigned_driver_id || '',
