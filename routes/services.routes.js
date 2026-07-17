@@ -711,9 +711,11 @@ function crearRutasServices({ pool }) {
   ====================================================== */
   router.get("/customer/history", async (req, res) => {
     const customerEmail = normalizarEmail(req.query.email || "");
+    const customerName = limpiarTexto(req.query.name || "");
+    const customerPhone = limpiarTexto(req.query.phone || "");
 
-    if (!customerEmail) {
-      return res.status(400).json({ ok: false, message: "Correo del cliente requerido" });
+    if (!customerEmail && !customerName && !customerPhone) {
+      return res.status(400).json({ ok: false, message: "Identificación del cliente requerida" });
     }
 
     try {
@@ -732,11 +734,13 @@ function crearRutasServices({ pool }) {
           ON j.source_type = 'PACKAGE' AND j.source_id = s.id
         LEFT JOIN bhuz_drivers d
           ON d.id = COALESCE(j.driver_id, s.driver_id)
-        WHERE LOWER(s.customer_email) = LOWER($1)
+        WHERE (NULLIF($1,'') IS NOT NULL AND LOWER(COALESCE(s.customer_email,'')) = LOWER($1))
+           OR (NULLIF($2,'') IS NOT NULL AND LOWER(TRIM(COALESCE(s.customer_name,''))) = LOWER(TRIM($2)))
+           OR (NULLIF($3,'') IS NOT NULL AND regexp_replace(COALESCE(s.customer_phone,''), '[^0-9]', '', 'g') = regexp_replace($3, '[^0-9]', '', 'g'))
         ORDER BY s.created_at DESC
         LIMIT 100
         `,
-        [customerEmail]
+        [customerEmail, customerName, customerPhone]
       );
 
       return res.json({
