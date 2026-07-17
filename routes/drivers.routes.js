@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const { sendOrderStatus, sendServiceStatus } = require('../utils/push-notifications');
 
 const id = (p='drv') => `${p}_${Date.now()}_${crypto.randomBytes(5).toString('hex')}`;
 const email = v => String(v||'').trim().toLowerCase();
@@ -24,7 +25,7 @@ module.exports = function crearRutasDrivers({ pool }) {
         completed_deliveries INTEGER NOT NULL DEFAULT 0, acceptance_rate NUMERIC(5,2) NOT NULL DEFAULT 100,
         commission_percent NUMERIC(5,2) NOT NULL DEFAULT 10, base_currency TEXT NOT NULL DEFAULT 'USD',
         last_latitude NUMERIC(10,7), last_longitude NUMERIC(10,7), last_location_at TIMESTAMPTZ,
-        last_seen_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        last_seen_at TIMESTAMPTZ, session_active BOOLEAN NOT NULL DEFAULT FALSE, inactivity_prompt_at TIMESTAMPTZ, inactivity_deadline_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS bhuz_delivery_jobs (
         id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL, driver_id TEXT REFERENCES bhuz_drivers(id),
@@ -109,6 +110,9 @@ module.exports = function crearRutasDrivers({ pool }) {
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS assignment_mode TEXT DEFAULT 'OPEN';
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_job_id TEXT;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_drivers ADD COLUMN IF NOT EXISTS session_active BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE bhuz_drivers ADD COLUMN IF NOT EXISTS inactivity_prompt_at TIMESTAMPTZ;
+      ALTER TABLE bhuz_drivers ADD COLUMN IF NOT EXISTS inactivity_deadline_at TIMESTAMPTZ;
       CREATE INDEX IF NOT EXISTS idx_bhuz_jobs_driver_status ON bhuz_delivery_jobs(driver_id,status,created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_bhuz_jobs_open ON bhuz_delivery_jobs(status,priority DESC,created_at);
       CREATE INDEX IF NOT EXISTS idx_bhuz_ledger_driver_date ON bhuz_driver_ledger(driver_id,created_at DESC);
@@ -126,7 +130,7 @@ module.exports = function crearRutasDrivers({ pool }) {
     isAvailable:x.is_available, rating:Number(x.rating||0), completedDeliveries:Number(x.completed_deliveries||0),
     acceptanceRate:Number(x.acceptance_rate||0), commissionPercent:Number(x.commission_percent||10),
     baseCurrency:x.base_currency, lastLatitude:x.last_latitude, lastLongitude:x.last_longitude,
-    lastSeenAt:x.last_seen_at, createdAt:x.created_at
+    lastSeenAt:x.last_seen_at, sessionActive:!!x.session_active, inactivityPromptAt:x.inactivity_prompt_at, inactivityDeadlineAt:x.inactivity_deadline_at, createdAt:x.created_at
   }) : null;
 
   async function ensureDriver(driverId, body={}) {
@@ -159,8 +163,9 @@ module.exports = function crearRutasDrivers({ pool }) {
       if(!d || String(d.password||'')!==p) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
       if(d.administrative_status==='PENDING') return res.status(403).json({ok:false,message:'Tu cuenta está pendiente de aprobación administrativa.'});
       if(['BLOCKED','REJECTED','SUSPENDED'].includes(d.administrative_status)) return res.status(403).json({ok:false,message:`Cuenta ${d.administrative_status.toLowerCase()}.`});
-      await pool.query('UPDATE bhuz_drivers SET last_seen_at=NOW(),updated_at=NOW() WHERE id=$1',[d.id]);
-      res.json({ok:true,driver:mapDriver(d)});
+      await pool.query("UPDATE bhuz_drivers SET last_seen_at=NOW(),session_active=TRUE,is_available=FALSE,operational_status='OFFLINE',inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1",[d.id]);
+      const fresh=(await pool.query('SELECT * FROM bhuz_drivers WHERE id=$1',[d.id])).rows[0];
+      res.json({ok:true,driver:mapDriver(fresh)});
     } catch(err){res.status(500).json({ok:false,message:'No se pudo iniciar sesión.'});}
   });
 
@@ -179,9 +184,12 @@ module.exports = function crearRutasDrivers({ pool }) {
       } catch (syncError) {
         console.warn('Sincronización de paquetes omitida:', syncError.message);
       }
+      await pool.query(`UPDATE bhuz_drivers SET session_active=FALSE,is_available=FALSE,operational_status='OFFLINE',updated_at=NOW() WHERE id=$1 AND session_active=TRUE AND last_seen_at < NOW()-INTERVAL '12 minutes'`,[driver.id]);
+      const eligibility=(await pool.query(`SELECT session_active,is_available,last_seen_at,administrative_status FROM bhuz_drivers WHERE id=$1`,[driver.id])).rows[0]||{};
+      const canReceive=eligibility.session_active===true && eligibility.is_available===true && eligibility.administrative_status==='APPROVED' && eligibility.last_seen_at && new Date(eligibility.last_seen_at).getTime()>Date.now()-12*60*1000;
       const [active,open,history,ledger,settlements,requests,stats]=await Promise.all([
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status NOT IN ('DELIVERED','CANCELLED') ORDER BY created_at DESC LIMIT 1`,[driver.id]),
-        pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id IS NULL AND status='PENDING_ASSIGNMENT' ORDER BY priority DESC,created_at ASC LIMIT 30`),
+        canReceive?pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id IS NULL AND status='PENDING_ASSIGNMENT' ORDER BY priority DESC,created_at ASC LIMIT 30`):Promise.resolve({rows:[]}),
         pool.query(`SELECT * FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status IN ('DELIVERED','CANCELLED') ORDER BY COALESCE(delivered_at,updated_at) DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_ledger WHERE driver_id=$1 ORDER BY created_at DESC LIMIT 100`,[driver.id]),
         pool.query(`SELECT * FROM bhuz_driver_settlements WHERE driver_id=$1 ORDER BY period_to DESC LIMIT 30`,[driver.id]),
@@ -200,10 +208,34 @@ module.exports = function crearRutasDrivers({ pool }) {
 
   r.patch('/:driverId/availability', async(req,res)=>{
     try { const available=!!req.body?.available; const op=available?'AVAILABLE':'OFFLINE';
-      const q=await pool.query(`UPDATE bhuz_drivers SET is_available=$2,operational_status=$3,last_seen_at=NOW(),updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId,available,op]);
+      const current=(await pool.query('SELECT session_active FROM bhuz_drivers WHERE id=$1',[req.params.driverId])).rows[0];
+      if(available && !current?.session_active) return res.status(409).json({ok:false,message:'Inicia sesión nuevamente antes de colocarte disponible.'});
+      const q=await pool.query(`UPDATE bhuz_drivers SET is_available=$2,operational_status=$3,last_seen_at=NOW(),inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId,available,op]);
       if(!q.rows[0]) return res.status(404).json({ok:false,message:'Repartidor no encontrado.'}); res.json({ok:true,driver:mapDriver(q.rows[0])});
     } catch(err){res.status(500).json({ok:false,message:'No se pudo cambiar la disponibilidad.'});}
   });
+
+  r.post('/:driverId/heartbeat', async(req,res)=>{
+    try {
+      const stationaryMinutes=Math.max(0,Number(req.body?.stationaryMinutes||0));
+      let d=(await pool.query('SELECT * FROM bhuz_drivers WHERE id=$1',[req.params.driverId])).rows[0];
+      if(!d) return res.status(404).json({ok:false,message:'Repartidor no encontrado.'});
+      if(d.inactivity_deadline_at && new Date(d.inactivity_deadline_at).getTime() < Date.now()) {
+        d=(await pool.query(`UPDATE bhuz_drivers SET session_active=FALSE,is_available=FALSE,operational_status='OFFLINE',updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId])).rows[0];
+        return res.json({ok:true,driver:mapDriver(d),forcedOffline:true});
+      }
+      let prompt=false;
+      if(d.is_available && stationaryMinutes>=10 && !d.inactivity_deadline_at){
+        d=(await pool.query(`UPDATE bhuz_drivers SET last_seen_at=NOW(),inactivity_prompt_at=NOW(),inactivity_deadline_at=NOW()+INTERVAL '2 minutes',updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId])).rows[0]; prompt=true;
+      } else {
+        d=(await pool.query(`UPDATE bhuz_drivers SET last_seen_at=NOW(),session_active=TRUE,updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId])).rows[0];
+      }
+      res.json({ok:true,driver:mapDriver(d),prompt,deadlineAt:d.inactivity_deadline_at});
+    } catch(err){res.status(500).json({ok:false,message:'No se pudo actualizar tu actividad.'});}
+  });
+
+  r.post('/:driverId/still-active', async(req,res)=>{try{const q=await pool.query(`UPDATE bhuz_drivers SET session_active=TRUE,last_seen_at=NOW(),inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId]);res.json({ok:true,driver:mapDriver(q.rows[0])})}catch(err){res.status(500).json({ok:false,message:'No se pudo confirmar la actividad.'})}});
+  r.post('/:driverId/logout', async(req,res)=>{try{await pool.query(`UPDATE bhuz_drivers SET session_active=FALSE,is_available=FALSE,operational_status='OFFLINE',inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);res.json({ok:true})}catch(err){res.status(500).json({ok:false,message:'No se pudo cerrar la sesión.'})}});
 
   r.patch('/:driverId/profile', async(req,res)=>{
     try { const b=req.body||{}; const q=await pool.query(`UPDATE bhuz_drivers SET full_name=COALESCE(NULLIF($2,''),full_name),phone=COALESCE(NULLIF($3,''),phone),address=COALESCE(NULLIF($4,''),address),country_code=COALESCE(NULLIF($5,''),country_code),city=COALESCE(NULLIF($6,''),city),zone=COALESCE(NULLIF($7,''),zone),vehicle_type=COALESCE(NULLIF($8,''),vehicle_type),vehicle_brand=COALESCE(NULLIF($9,''),vehicle_brand),vehicle_model=COALESCE(NULLIF($10,''),vehicle_model),vehicle_plate=COALESCE(NULLIF($11,''),vehicle_plate),vehicle_color=COALESCE(NULLIF($12,''),vehicle_color),updated_at=NOW() WHERE id=$1 RETURNING *`,[req.params.driverId,b.fullName||'',b.phone||'',b.address||'',b.countryCode||'',b.city||'',b.zone||'',b.vehicleType||'',b.vehicleBrand||'',b.vehicleModel||'',b.vehiclePlate||'',b.vehicleColor||'']);
@@ -217,6 +249,8 @@ module.exports = function crearRutasDrivers({ pool }) {
     const client=await pool.connect(); try { await client.query('BEGIN');
       const job=(await client.query(`SELECT * FROM bhuz_delivery_jobs WHERE id=$1 FOR UPDATE`,[req.params.jobId])).rows[0];
       if(!job||job.status!=='PENDING_ASSIGNMENT'||job.driver_id) {await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'La tarea ya no está disponible.'});}
+      const eligible=(await client.query(`SELECT id FROM bhuz_drivers WHERE id=$1 AND administrative_status='APPROVED' AND session_active=TRUE AND is_available=TRUE AND last_seen_at>NOW()-INTERVAL '12 minutes' FOR UPDATE`,[req.params.driverId])).rows[0];
+      if(!eligible){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Debes tener la sesión activa y estar disponible para aceptar servicios.'});}
       const active=(await client.query(`SELECT id FROM bhuz_delivery_jobs WHERE driver_id=$1 AND status NOT IN ('DELIVERED','CANCELLED') LIMIT 1`,[req.params.driverId])).rows[0];
       if(active){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Ya tienes una entrega activa.'});}
       const q=await client.query(`UPDATE bhuz_delivery_jobs SET driver_id=$2,status='ASSIGNED',assigned_at=NOW(),updated_at=NOW() WHERE id=$1 RETURNING *`,[job.id,req.params.driverId]);
@@ -244,7 +278,9 @@ module.exports = function crearRutasDrivers({ pool }) {
         if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
         await client.query(`UPDATE bhuz_drivers SET operational_status='AVAILABLE',is_available=TRUE,completed_deliveries=completed_deliveries+1,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
       }
-      await client.query('COMMIT');res.json({ok:true,job:q.rows[0]});
+      await client.query('COMMIT');
+      try{if(job.source_type==='PACKAGE'){const svc=(await pool.query('SELECT * FROM bhuz_services WHERE id=$1',[job.source_id])).rows[0];await sendServiceStatus(pool,svc,'Actualización de tu paquete',({GOING_TO_PICKUP:'El repartidor va hacia el punto de retiro.',PICKED_UP:'Tu paquete fue retirado.',GOING_TO_DELIVERY:'Tu paquete va en camino.',DELIVERED:'Tu paquete fue entregado.'})[next]||'El estado de tu paquete cambió.')}else{const ord=(await pool.query('SELECT * FROM orders WHERE id=$1',[job.source_id])).rows[0];await sendOrderStatus(pool,ord,'Actualización de tu pedido',({GOING_TO_PICKUP:'El repartidor va hacia el restaurante.',PICKED_UP:'Tu pedido fue retirado.',GOING_TO_DELIVERY:'Tu pedido va en camino.',DELIVERED:'Tu pedido fue entregado.'})[next]||'El estado de tu pedido cambió.')}}catch(pushErr){console.warn('Push de estado omitido:',pushErr.message)}
+      res.json({ok:true,job:q.rows[0]});
     } catch(err){await client.query('ROLLBACK');console.error(err);res.status(500).json({ok:false,message:err.message||'No se pudo cambiar el estado.'});} finally{client.release();}
   });
 
