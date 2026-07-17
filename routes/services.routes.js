@@ -819,6 +819,74 @@ function crearRutasServices({ pool }) {
         [newStatus, serviceId]
       );
 
+      /*
+        Integración directa paquete → panel repartidor.
+        Antes se dependía de que el repartidor abriera su dashboard para
+        intentar sincronizar el servicio. Ahora la tarea se crea en el mismo
+        momento en que el cliente publica el envío.
+      */
+      if (newStatus === "SEARCHING_DRIVER") {
+        await client.query(
+          `
+          INSERT INTO bhuz_delivery_jobs (
+            id, source_type, source_id, status,
+            pickup_name, pickup_address, pickup_reference, pickup_latitude, pickup_longitude,
+            delivery_name, delivery_address, delivery_reference, delivery_latitude, delivery_longitude,
+            distance_km, service_total, driver_earning, currency, payment_method, payment_received_by,
+            created_at, updated_at
+          )
+          SELECT
+            'job_' || s.id, 'PACKAGE', s.id, 'PENDING_ASSIGNMENT',
+            COALESCE(NULLIF(s.customer_name, ''), 'Retiro de paquete'),
+            s.pickup_address, s.pickup_reference, s.pickup_latitude, s.pickup_longitude,
+            COALESCE(NULLIF(s.receiver_name, ''), 'Receptor'),
+            s.delivery_address, s.delivery_reference, s.delivery_latitude, s.delivery_longitude,
+            COALESCE(s.distance_km, 0), COALESCE(s.total_amount, 0),
+            CASE
+              WHEN COALESCE(s.driver_earning, 0) > 0 THEN s.driver_earning
+              ELSE ROUND(COALESCE(s.total_amount, 0)::numeric * 0.10, 2)
+            END,
+            COALESCE(s.currency, 'USD'), s.payment_method, 'BHUZ', NOW(), NOW()
+          FROM bhuz_services s
+          WHERE s.id = $1
+          ON CONFLICT (source_type, source_id) DO UPDATE SET
+            status = CASE
+              WHEN bhuz_delivery_jobs.driver_id IS NULL
+               AND bhuz_delivery_jobs.status NOT IN ('DELIVERED','CANCELLED')
+              THEN 'PENDING_ASSIGNMENT'
+              ELSE bhuz_delivery_jobs.status
+            END,
+            pickup_name = EXCLUDED.pickup_name,
+            pickup_address = EXCLUDED.pickup_address,
+            pickup_reference = EXCLUDED.pickup_reference,
+            pickup_latitude = EXCLUDED.pickup_latitude,
+            pickup_longitude = EXCLUDED.pickup_longitude,
+            delivery_name = EXCLUDED.delivery_name,
+            delivery_address = EXCLUDED.delivery_address,
+            delivery_reference = EXCLUDED.delivery_reference,
+            delivery_latitude = EXCLUDED.delivery_latitude,
+            delivery_longitude = EXCLUDED.delivery_longitude,
+            distance_km = EXCLUDED.distance_km,
+            service_total = EXCLUDED.service_total,
+            driver_earning = EXCLUDED.driver_earning,
+            currency = EXCLUDED.currency,
+            payment_method = EXCLUDED.payment_method,
+            updated_at = NOW()
+          `,
+          [serviceId]
+        );
+      }
+
+      if (newStatus === "CANCELLED") {
+        await client.query(
+          `UPDATE bhuz_delivery_jobs
+           SET status='CANCELLED', updated_at=NOW()
+           WHERE source_type='PACKAGE' AND source_id=$1
+             AND status NOT IN ('DELIVERED','CANCELLED')`,
+          [serviceId]
+        );
+      }
+
       await insertarHistorial(client, {
         serviceId,
         previousStatus: service.status,
