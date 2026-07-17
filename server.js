@@ -26,6 +26,7 @@ const crearRutasAdmin = require("./routes/admin.routes");
 const crearRutasDirecciones = require("./routes/direcciones.routes");
 const crearRutasServices = require("./routes/services.routes");
 const crearRutasDrivers = require("./routes/drivers.routes");
+const crearRutasTracking = require("./routes/tracking.routes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -2669,6 +2670,7 @@ app.post("/invite/:token/save-guest", async (req, res) => {
    - POST /api/services/:id/confirm-delivery
 ====================================================== */
 app.use("/api/drivers", crearRutasDrivers({ pool }));
+app.use("/api/tracking", crearRutasTracking({ pool }));
 
 app.use("/api/services", crearRutasServices({
   pool
