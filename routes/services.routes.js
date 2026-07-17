@@ -583,6 +583,8 @@ function crearRutasServices({ pool }) {
     const token = String(req.params.token || "").trim();
     const latitude = limpiarTexto(req.body?.latitude || req.body?.lat);
     const longitude = limpiarTexto(req.body?.longitude || req.body?.lng);
+    const deliveryAddress = limpiarTexto(req.body?.deliveryAddress || req.body?.direccionEntrega || "");
+    const deliveryReference = limpiarTexto(req.body?.deliveryReference || req.body?.referenciaEntrega || "");
 
     if (!token) {
       return res.status(400).json({ ok: false, message: "Token inválido" });
@@ -652,15 +654,19 @@ function crearRutasServices({ pool }) {
         SET
           delivery_latitude = $1,
           delivery_longitude = $2,
-          distance_km = $3,
-          total_amount = $4,
+          delivery_address = COALESCE(NULLIF($3, ''), delivery_address),
+          delivery_reference = COALESCE(NULLIF($4, ''), delivery_reference),
+          distance_km = $5,
+          total_amount = $6,
           updated_at = NOW()
-        WHERE id = $5
+        WHERE id = $7
         RETURNING *
         `,
         [
           latitude,
           longitude,
+          deliveryAddress,
+          deliveryReference,
           distanceKm,
           totalAmount,
           service.id
