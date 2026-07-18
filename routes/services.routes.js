@@ -759,7 +759,7 @@ function crearRutasServices({ pool, getSessionUser }) {
                COALESCE(d.phone, s.driver_phone, '') AS assigned_driver_phone,
                COALESCE(d.vehicle_type, '') AS driver_vehicle_type,
                COALESCE(d.vehicle_plate, '') AS driver_vehicle_plate,
-               j.accepted_at, j.picked_up_at, j.delivered_at
+               j.assigned_at AS accepted_at, j.picked_up_at, j.delivered_at
         FROM bhuz_services s
         LEFT JOIN bhuz_delivery_jobs j
           ON j.source_type = 'PACKAGE' AND j.source_id = s.id
