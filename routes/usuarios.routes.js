@@ -1,3 +1,4 @@
+const { hashPassword, verifyPassword } = require("../utils/passwords");
 const express = require("express");
 
 /* ======================================================
@@ -35,7 +36,6 @@ function crearRutasUsuarios(dependencias) {
     address: row.address || "",
     phone: row.phone || "",
     email: normalizeEmail(row.email),
-    password: row.password || "",
     role: row.role || "customer",
     status: row.status || "active",
     reference: row.reference || "",
@@ -205,7 +205,7 @@ function crearRutasUsuarios(dependencias) {
           });
         }
 
-        if (String(currentUser.password || "") !== String(finalCurrentPassword)) {
+        if (!(await verifyPassword(finalCurrentPassword, currentUser.password))) {
           await client.query("ROLLBACK");
 
           return res.status(401).json({
@@ -229,7 +229,7 @@ function crearRutasUsuarios(dependencias) {
         [
           normalizeText(finalName),
           normalizeText(finalPhone),
-          finalNewPassword,
+          finalNewPassword ? await hashPassword(finalNewPassword) : "",
           email
         ]
       );

@@ -1,6 +1,7 @@
 console.log("SERVER NUEVO CON ADMIN ACTIVO");
 
 const express = require("express");
+const { hashPassword } = require("./utils/passwords");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
@@ -321,7 +322,6 @@ async function migrateUsersToPostgres(client) {
         full_name = EXCLUDED.full_name,
         name = EXCLUDED.name,
         email = EXCLUDED.email,
-        password = EXCLUDED.password,
         phone = EXCLUDED.phone,
         address = EXCLUDED.address,
         reference = EXCLUDED.reference,
@@ -336,7 +336,7 @@ async function migrateUsersToPostgres(client) {
         toNullableText(user.fullName || user.name),
         toNullableText(user.name || user.fullName),
         email,
-        String(user.password || ""),
+        await hashPassword(String(user.password || "")),
         toNullableText(user.phone),
         toNullableText(user.address),
         toNullableText(user.reference),
@@ -377,7 +377,6 @@ async function migrateRestaurantsToPostgres(client) {
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
         email = EXCLUDED.email,
-        password = EXCLUDED.password,
         phone = EXCLUDED.phone,
         address = EXCLUDED.address,
         category = EXCLUDED.category,
@@ -396,7 +395,7 @@ async function migrateRestaurantsToPostgres(client) {
         id,
         toNullableText(restaurant.name) || "Restaurante",
         email,
-        String(restaurant.password || ""),
+        await hashPassword(String(restaurant.password || "")),
         toNullableText(restaurant.phone),
         toNullableText(restaurant.address),
         toNullableText(restaurant.category || restaurant.type),
@@ -493,7 +492,6 @@ async function migrateAdminsToPostgres(client) {
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
         email = EXCLUDED.email,
-        password = EXCLUDED.password,
         role = EXCLUDED.role,
         status = EXCLUDED.status,
         updated_at = COALESCE(EXCLUDED.updated_at, NOW())
@@ -502,7 +500,7 @@ async function migrateAdminsToPostgres(client) {
         id,
         toNullableText(admin.name || "Administrador"),
         email,
-        String(admin.password || ""),
+        await hashPassword(String(admin.password || "")),
         toNullableText(admin.role || "admin"),
         toNullableText(admin.status || "active"),
         toDateValue(admin.createdAt),
@@ -803,7 +801,6 @@ function mapDbUser(row) {
     address: row.address || "",
     phone: row.phone || "",
     email: normalizeEmail(row.email),
-    password: row.password || "",
     role: row.role || "customer",
     status: row.status || "active",
     reference: row.reference || "",
@@ -823,7 +820,6 @@ function mapDbRestaurant(row) {
     address: row.address || "",
     phone: row.phone || "",
     email: normalizeEmail(row.email),
-    password: row.password || "",
     role: row.role || "restaurant",
     category: row.category || "",
     description: row.description || "",
@@ -1419,6 +1415,7 @@ app.use("/users/:email/addresses", crearRutasDirecciones({
    - No cambia login, registro, admin ni pedidos.
 ====================================================== */
 app.use("/users", crearRutasUsuarios({
+  pool,
   normalizeEmail,
   getUsersFromPostgres,
   getUserByEmailFromPostgres

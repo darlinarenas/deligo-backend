@@ -1,3 +1,4 @@
+const { hashPassword, verifyAndUpgradePassword } = require("../utils/passwords");
 const express = require('express');
 const crypto = require('crypto');
 const { sendOrderStatus, sendServiceStatus } = require('../utils/push-notifications');
@@ -159,7 +160,7 @@ module.exports = function crearRutasDrivers({ pool }) {
       if(exists.rows[0]) return res.status(409).json({ok:false,message:'Ya existe un repartidor con ese correo.'});
       const driverId=id('driver');
       const q=await pool.query(`INSERT INTO bhuz_drivers(id,full_name,email,password,phone,identity_document,address,country_code,city,zone,vehicle_type,vehicle_brand,vehicle_model,vehicle_plate,vehicle_color,emergency_contact,administrative_status)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'PENDING') RETURNING *`,[driverId,b.fullName,e,String(b.password),b.phone,b.identityDocument||null,b.address||null,b.countryCode||'VE',b.city||'Punto Fijo',b.zone||null,b.vehicleType||'Moto',b.vehicleBrand||null,b.vehicleModel||null,b.vehiclePlate||null,b.vehicleColor||null,b.emergencyContact||null]);
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'PENDING') RETURNING *`,[driverId,b.fullName,e,await hashPassword(String(b.password)),b.phone,b.identityDocument||null,b.address||null,b.countryCode||'VE',b.city||'Punto Fijo',b.zone||null,b.vehicleType||'Moto',b.vehicleBrand||null,b.vehicleModel||null,b.vehiclePlate||null,b.vehicleColor||null,b.emergencyContact||null]);
       res.status(201).json({ok:true,driver:mapDriver(q.rows[0]),message:'Registro creado. Pendiente de aprobación.'});
     } catch(err){ console.error(err); res.status(500).json({ok:false,message:'No se pudo registrar el repartidor.'}); }
   });
@@ -167,7 +168,8 @@ module.exports = function crearRutasDrivers({ pool }) {
   r.post('/login', async(req,res)=>{
     try { await ensureDriverSchema(); const e=email(req.body?.email); const p=String(req.body?.password||'');
       const q=await pool.query('SELECT * FROM bhuz_drivers WHERE LOWER(email)=LOWER($1)',[e]); const d=q.rows[0];
-      if(!d || String(d.password||'')!==p) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
+      const validPassword=d && await verifyAndUpgradePassword({password:p,storedPassword:d.password,onUpgrade:(hash)=>pool.query('UPDATE bhuz_drivers SET password=$1,updated_at=NOW() WHERE id=$2',[hash,d.id])});
+      if(!d || !validPassword) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
       if(d.administrative_status==='PENDING') return res.status(403).json({ok:false,message:'Tu cuenta está pendiente de aprobación administrativa.'});
       if(['BLOCKED','REJECTED','SUSPENDED'].includes(d.administrative_status)) return res.status(403).json({ok:false,message:`Cuenta ${d.administrative_status.toLowerCase()}.`});
       await pool.query("UPDATE bhuz_drivers SET last_seen_at=NOW(),session_active=TRUE,is_available=FALSE,operational_status='OFFLINE',inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1",[d.id]);
