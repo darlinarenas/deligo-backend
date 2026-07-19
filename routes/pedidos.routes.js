@@ -1,5 +1,6 @@
 const express = require("express");
-const { verifyPassword } = require("../utils/passwords");
+const crypto = require("crypto");
+const { verifyPassword, hashPassword } = require("../utils/passwords");
 const { sendOrderStatus } = require("../utils/push-notifications");
 
 const TRANSITIONS = {
@@ -26,6 +27,28 @@ function statusNotice(status, restaurantName="el restaurante") {
   return map[status] || ["Pedido actualizado", "Tu pedido cambió de estado."];
 }
 
+async function ensureCustomerDeliveryCodes(pool, orders = []) {
+  for (const order of orders) {
+    const status = String(order.status || "").toLowerCase();
+    if (["entregado", "cancelado"].includes(status) || order.deliveryCode) continue;
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const hash = await hashPassword(code);
+    const result = await pool.query(
+      `UPDATE orders
+       SET delivery_code_hash = COALESCE(delivery_code_hash, $2),
+           delivery_code_plain = COALESCE(NULLIF(delivery_code_plain, ''), $3),
+           delivery_code_attempts = COALESCE(delivery_code_attempts, 0),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING delivery_code_plain`,
+      [order.id, hash, code]
+    );
+    order.deliveryCode = result.rows[0]?.delivery_code_plain || code;
+  }
+  return orders;
+}
+
 function crearRutasPedidos(dependencias) {
   const router = express.Router();
   const { pool, normalizeEmail, normalizeOrderStatus, createOrderInPostgres, getOrdersFromPostgres, getOrderByIdFromPostgres, authMiddleware } = dependencias;
@@ -47,6 +70,8 @@ function crearRutasPedidos(dependencias) {
 
   router.get("/me", ...requireRole("customer"), async(req,res)=>{
     const orders=await getOrdersFromPostgres({customerEmail:req.auth.user.email});
+    await ensureCustomerDeliveryCodes(pool, orders);
+    res.set("Cache-Control", "no-store");
     res.json({ok:true,source:"postgres",total:orders.length,orders});
   });
 
@@ -62,6 +87,8 @@ function crearRutasPedidos(dependencias) {
   });
   router.get("/customer/:email", ...requireRole("customer"), requireOwnerEmail("email"), async(req,res)=>{
     const orders=await getOrdersFromPostgres({customerEmail:req.auth.user.email});
+    await ensureCustomerDeliveryCodes(pool, orders);
+    res.set("Cache-Control", "no-store");
     res.json({ok:true,source:"postgres",total:orders.length,orders});
   });
 

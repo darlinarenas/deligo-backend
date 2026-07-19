@@ -17,7 +17,7 @@ module.exports=function crearRutasTracking({pool}){
     ]).catch(e=>{schemaPromise=null;throw e});
     return schemaPromise;
   }
-  r.get('/config',async(req,res)=>{try{await ensure();res.json({ok:true,vapidPublicKey:String(process.env.VAPID_PUBLIC_KEY||'')})}catch(e){res.status(500).json({ok:false,message:'No se pudo cargar la configuración.'})}});
+  r.get('/config',async(req,res)=>{try{await ensure();res.json({ok:true,vapidPublicKey:String(process.env.VAPID_PUBLIC_KEY||'').trim().replace(/^['\"]|['\"]$/g,'')})}catch(e){res.status(500).json({ok:false,message:'No se pudo cargar la configuración.'})}});
   r.post('/subscriptions',async(req,res)=>{try{await saveSubscription(pool,req.body||{});res.status(201).json({ok:true})}catch(e){res.status(e.statusCode||500).json({ok:false,message:e.message||'No se pudo activar la notificación.'})}});
   r.delete('/subscriptions',async(req,res)=>{try{await removeSubscription(pool,req.body?.endpoint);res.json({ok:true})}catch(e){res.status(500).json({ok:false,message:'No se pudo desactivar la notificación.'})}});
   r.get('/live/:sourceType/:sourceId',async(req,res)=>{try{
