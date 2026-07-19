@@ -36,11 +36,12 @@ async function ensureCustomerDeliveryCodes(pool, orders = []) {
     const hash = await hashPassword(code);
     const result = await pool.query(
       `UPDATE orders
-       SET delivery_code_hash = COALESCE(delivery_code_hash, $2),
-           delivery_code_plain = COALESCE(NULLIF(delivery_code_plain, ''), $3),
-           delivery_code_attempts = COALESCE(delivery_code_attempts, 0),
+       SET delivery_code_hash = $2,
+           delivery_code_plain = $3,
+           delivery_code_attempts = 0,
            updated_at = NOW()
        WHERE id = $1
+         AND delivery_code_verified_at IS NULL
        RETURNING delivery_code_plain`,
       [order.id, hash, code]
     );
@@ -73,6 +74,22 @@ function crearRutasPedidos(dependencias) {
     await ensureCustomerDeliveryCodes(pool, orders);
     res.set("Cache-Control", "no-store");
     res.json({ok:true,source:"postgres",total:orders.length,orders});
+  });
+
+
+  router.get("/:id/delivery-code", ...requireRole("customer"), async(req,res)=>{
+    try{
+      const orderId=String(req.params.id||"").trim();
+      const found=await getOrderByIdFromPostgres(orderId);
+      if(!found) return res.status(404).json({ok:false,message:"Pedido no encontrado"});
+      if(normalizeEmail(found.customerEmail)!==normalizeEmail(req.auth.user.email)) return res.status(403).json({ok:false,message:"Este pedido no pertenece a tu cuenta."});
+      if(["entregado","cancelado"].includes(normalizeOrderStatus(found.status))) return res.status(409).json({ok:false,message:"Este pedido ya no requiere clave de entrega."});
+      await ensureCustomerDeliveryCodes(pool,[found]);
+      return res.json({ok:true,deliveryCode:found.deliveryCode,orderNumber:found.orderNumber});
+    }catch(error){
+      console.error("Código de entrega:",error);
+      return res.status(500).json({ok:false,message:"No se pudo generar la clave de entrega."});
+    }
   });
 
   router.get("/restaurant/me", ...requireRole("restaurant"), async(req,res)=>{
