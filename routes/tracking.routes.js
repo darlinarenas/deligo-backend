@@ -1,4 +1,5 @@
 const express=require('express');
+const { getVapidDetails } = require('../utils/vapid');
 const {ensurePushSchema,saveSubscription,removeSubscription}=require('../utils/push-notifications');
 
 module.exports=function crearRutasTracking({pool}){
@@ -17,7 +18,7 @@ module.exports=function crearRutasTracking({pool}){
     ]).catch(e=>{schemaPromise=null;throw e});
     return schemaPromise;
   }
-  r.get('/config',async(req,res)=>{try{await ensure();const key=String(process.env.VAPID_PUBLIC_KEY||'').replace(/\s+/g,'').replace(/^['\"]|['\"]$/g,'');if(!/^[A-Za-z0-9_-]{80,100}$/.test(key))return res.status(500).json({ok:false,message:'La clave pública VAPID del servidor tiene un formato inválido.'});res.set('Cache-Control','no-store');res.json({ok:true,vapidPublicKey:key})}catch(e){res.status(500).json({ok:false,message:'No se pudo cargar la configuración.'})}});
+  r.get('/config',async(req,res)=>{try{await ensure();const vapid=getVapidDetails();if(!vapid.configured)return res.status(500).json({ok:false,message:'Faltan las claves VAPID en el servidor.'});res.set('Cache-Control','no-store, no-cache, must-revalidate');res.json({ok:true,vapidPublicKey:vapid.publicKey})}catch(e){console.error('VAPID config:',e.message);res.status(500).json({ok:false,message:'No se pudo cargar una clave pública P-256 válida.'})}});
   r.post('/subscriptions',async(req,res)=>{try{await saveSubscription(pool,req.body||{});res.status(201).json({ok:true})}catch(e){res.status(e.statusCode||500).json({ok:false,message:e.message||'No se pudo activar la notificación.'})}});
   r.delete('/subscriptions',async(req,res)=>{try{await removeSubscription(pool,req.body?.endpoint);res.json({ok:true})}catch(e){res.status(500).json({ok:false,message:'No se pudo desactivar la notificación.'})}});
   r.get('/live/:sourceType/:sourceId',async(req,res)=>{try{

@@ -150,6 +150,7 @@ async function initDatabaseTables() {
     await pool.query(`
       ALTER TABLE orders
       ADD COLUMN IF NOT EXISTS public_order_number TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code VARCHAR(6),
       ADD COLUMN IF NOT EXISTS delivery_code_hash TEXT,
       ADD COLUMN IF NOT EXISTS delivery_code_plain TEXT,
       ADD COLUMN IF NOT EXISTS delivery_code_verified_at TIMESTAMPTZ,
@@ -947,7 +948,7 @@ function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
   return {
     id: orderRow.id || "",
     orderNumber: orderRow.public_order_number || String(orderRow.id || "").replace(/\D/g, "").slice(-6).padStart(6, "0"),
-    deliveryCode: orderRow.delivery_code_plain || "",
+    deliveryCode: orderRow.delivery_code || orderRow.delivery_code_plain || "",
     deliveryCodeVerifiedAt: orderRow.delivery_code_verified_at || null,
     userId: orderRow.user_id || "",
     restaurantEmail: normalizeEmail(orderRow.restaurant_email),
@@ -1215,9 +1216,9 @@ async function createOrderInPostgres(body) {
         id, user_id, customer_email, customer_name, customer_phone, customer_address,
         restaurant_id, restaurant_email, restaurant_name, status, total,
         payment_method, payment_status, notes, delivery_address, delivery_reference,
-        latitude, longitude, date_text, time_text, public_order_number, delivery_code_hash, delivery_code_plain, created_at, updated_at
+        latitude, longitude, date_text, time_text, public_order_number, delivery_code, delivery_code_hash, delivery_code_plain, created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,NOW())
       RETURNING *
       `,
       [
@@ -1242,6 +1243,7 @@ async function createOrderInPostgres(body) {
         normalizeText(body.date || new Date(createdAt).toLocaleDateString("es-VE")),
         normalizeText(body.time || new Date(createdAt).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })),
         publicOrderNumber,
+        deliveryCode,
         deliveryCodeHash,
         deliveryCode,
         createdAt

@@ -331,7 +331,8 @@ module.exports = function crearRutasDrivers({ pool }) {
         if(!order){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Pedido no encontrado.'});}
         if(order.delivery_code_verified_at){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este código ya fue utilizado.'});}
         if(Number(order.delivery_code_attempts||0)>=5){await client.query('ROLLBACK');return res.status(423).json({ok:false,message:'Código bloqueado. Contacta al administrador.'});}
-        const valid=await verifyPassword(deliveryCode,order.delivery_code_hash||'');
+        const directCode=String(order.delivery_code||order.delivery_code_plain||'').trim();
+        const valid=directCode ? directCode===deliveryCode : await verifyPassword(deliveryCode,order.delivery_code_hash||'');
         if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[order.id]);await client.query('COMMIT');return res.status(400).json({ok:false,message:'Código incorrecto.'});}
         const q=await client.query(`UPDATE bhuz_delivery_jobs SET status='DELIVERED',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId]);
         await client.query(`UPDATE orders SET status='entregado',delivery_status='DELIVERED',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[order.id,req.params.driverId]);

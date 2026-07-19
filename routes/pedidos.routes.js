@@ -14,6 +14,24 @@ const TRANSITIONS = {
 const RESTAURANT_STATES = new Set(["aceptado", "preparando", "listo", "retirado"]);
 const DRIVER_STATES = new Set(["en_camino", "entregado"]);
 
+let deliverySchemaPromise = null;
+async function ensureOrderDeliverySchema(pool) {
+  if (deliverySchemaPromise) return deliverySchemaPromise;
+  deliverySchemaPromise = pool.query(`
+    ALTER TABLE orders
+      ADD COLUMN IF NOT EXISTS delivery_code VARCHAR(6),
+      ADD COLUMN IF NOT EXISTS delivery_code_hash TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code_plain TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS delivery_code_attempts INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS delivered_by_driver_id TEXT;
+    UPDATE orders
+       SET delivery_code = COALESCE(NULLIF(delivery_code, ''), NULLIF(delivery_code_plain, ''))
+     WHERE delivery_code IS NULL OR delivery_code = '';
+  `).catch(error => { deliverySchemaPromise = null; throw error; });
+  return deliverySchemaPromise;
+}
+
 function statusNotice(status, restaurantName="el restaurante") {
   const map = {
     aceptado: ["Pedido aceptado", `${restaurantName} aceptó tu pedido.`],
@@ -28,6 +46,7 @@ function statusNotice(status, restaurantName="el restaurante") {
 }
 
 async function ensureCustomerDeliveryCodes(pool, orders = []) {
+  await ensureOrderDeliverySchema(pool);
   for (const order of orders) {
     const status = String(order.status || "").toLowerCase();
     if (["entregado", "cancelado"].includes(status) || order.deliveryCode) continue;
@@ -36,16 +55,17 @@ async function ensureCustomerDeliveryCodes(pool, orders = []) {
     const hash = await hashPassword(code);
     const result = await pool.query(
       `UPDATE orders
-       SET delivery_code_hash = $2,
-           delivery_code_plain = $3,
+       SET delivery_code = $2,
+           delivery_code_hash = $3,
+           delivery_code_plain = $2,
            delivery_code_attempts = 0,
            updated_at = NOW()
        WHERE id = $1
          AND delivery_code_verified_at IS NULL
-       RETURNING delivery_code_plain`,
-      [order.id, hash, code]
+       RETURNING delivery_code`,
+      [order.id, code, hash]
     );
-    order.deliveryCode = result.rows[0]?.delivery_code_plain || code;
+    order.deliveryCode = result.rows[0]?.delivery_code || code;
   }
   return orders;
 }
@@ -150,7 +170,8 @@ function crearRutasPedidos(dependencias) {
       if(!order){await client.query("ROLLBACK");return res.status(404).json({ok:false,message:"Pedido no encontrado"});}
       if(normalizeOrderStatus(order.status)!=="en_camino"){await client.query("ROLLBACK");return res.status(409).json({ok:false,message:"El pedido todavía no está en camino."});}
       if(Number(order.delivery_code_attempts||0)>=5){await client.query("ROLLBACK");return res.status(423).json({ok:false,message:"Código bloqueado por demasiados intentos. Contacta al administrador."});}
-      const valid=await verifyPassword(code,order.delivery_code_hash||"");
+      const directCode=String(order.delivery_code||order.delivery_code_plain||"").trim();
+      const valid=directCode ? directCode===code : await verifyPassword(code,order.delivery_code_hash||"");
       if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[orderId]);await client.query("COMMIT");return res.status(400).json({ok:false,message:"Código incorrecto."});}
       await client.query(`UPDATE orders SET status='entregado',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[orderId,req.auth.user.id||null]);
       await client.query("COMMIT");
