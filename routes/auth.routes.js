@@ -381,14 +381,13 @@ function crearRutasAuth(dependencias) {
           role: "restaurant"
         };
 
-        const sessionToken = createSession(res, sessionUser, "user");
+        createSession(res, sessionUser, "user");
 
         return res.json({
           ok: true,
           source: "postgres",
           message: "Login correcto",
-          user: sessionUser,
-          sessionToken
+          user: sessionUser
         });
       }
 
@@ -419,14 +418,13 @@ function crearRutasAuth(dependencias) {
         role: "customer"
       };
 
-      const sessionToken = createSession(res, sessionUser, "user");
+      createSession(res, sessionUser, "user");
 
       return res.json({
         ok: true,
         source: "postgres",
         message: "Login correcto",
-        user: sessionUser,
-        sessionToken
+        user: sessionUser
       });
     } catch (error) {
       console.error("Error en login PostgreSQL:", error.message);
