@@ -47,25 +47,41 @@ function statusNotice(status, restaurantName="el restaurante") {
 
 async function ensureCustomerDeliveryCodes(pool, orders = []) {
   await ensureOrderDeliverySchema(pool);
+
   for (const order of orders) {
     const status = String(order.status || "").toLowerCase();
-    if (["entregado", "cancelado"].includes(status) || order.deliveryCode) continue;
+    if (["entregado", "cancelado"].includes(status)) continue;
 
-    const code = String(crypto.randomInt(100000, 1000000));
-    const hash = await hashPassword(code);
-    const result = await pool.query(
-      `UPDATE orders
-       SET delivery_code = $2,
-           delivery_code_hash = $3,
-           delivery_code_plain = $2,
-           delivery_code_attempts = 0,
-           updated_at = NOW()
-       WHERE id = $1
-         AND delivery_code_verified_at IS NULL
-       RETURNING delivery_code`,
-      [order.id, code, hash]
+    // Primero leer la fuente real. Paquetes trabaja con una clave directa en BD;
+    // comida queda igual: una clave directa de 6 dígitos en orders.delivery_code.
+    const current = await pool.query(
+      `SELECT delivery_code, delivery_code_plain, delivery_code_verified_at
+       FROM orders WHERE id = $1 LIMIT 1`,
+      [order.id]
     );
-    order.deliveryCode = result.rows[0]?.delivery_code || code;
+    const row = current.rows[0] || {};
+    let code = String(row.delivery_code || row.delivery_code_plain || "").trim();
+
+    if (!/^\d{6}$/.test(code) && !row.delivery_code_verified_at) {
+      code = String(crypto.randomInt(100000, 1000000));
+      const hash = await hashPassword(code);
+      const updated = await pool.query(
+        `UPDATE orders
+         SET delivery_code = $2,
+             delivery_code_hash = $3,
+             delivery_code_plain = $2,
+             delivery_code_attempts = 0,
+             updated_at = NOW()
+         WHERE id = $1
+           AND delivery_code_verified_at IS NULL
+         RETURNING delivery_code`,
+        [order.id, code, hash]
+      );
+      code = String(updated.rows[0]?.delivery_code || code).trim();
+    }
+
+    order.deliveryCode = /^\d{6}$/.test(code) ? code : "";
+    order.delivery_code = order.deliveryCode;
   }
   return orders;
 }
@@ -77,6 +93,8 @@ function crearRutasPedidos(dependencias) {
 
   router.post("/", ...requireRole("customer"), async (req, res) => {
     try {
+      // Igual que paquetes: la columna y la clave deben existir antes de insertar.
+      await ensureOrderDeliverySchema(pool);
       const trusted = req.auth.user;
       const body = { ...(req.body || {}), userId: trusted.id, customerEmail: trusted.email, customer: { ...(req.body?.customer || {}), email: trusted.email, fullName: trusted.fullName || trusted.name, phone: trusted.phone } };
       const newOrder = await createOrderInPostgres(body);
