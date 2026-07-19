@@ -303,16 +303,7 @@ module.exports = function crearRutasDrivers({ pool }) {
       }
       const delivered=next==='DELIVERED'; const q=await client.query(`UPDATE bhuz_delivery_jobs SET status=$3,picked_up_at=CASE WHEN $3='PICKED_UP' THEN NOW() ELSE picked_up_at END,delivered_at=CASE WHEN $3='DELIVERED' THEN NOW() ELSE delivered_at END,updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId,next]);
       if(job.source_type==='PACKAGE') { const sm={GOING_TO_PICKUP:'GOING_TO_PICKUP',PICKED_UP:'PACKAGE_PICKED',GOING_TO_DELIVERY:'GOING_TO_DELIVERY'}; if(sm[next]) await client.query('UPDATE bhuz_services SET status=$2,updated_at=NOW() WHERE id=$1',[job.source_id,sm[next]]); }
-      if(job.source_type==='FOOD_ORDER') {
-        const foodStatus={
-          GOING_TO_PICKUP:'aceptado',
-          ARRIVED_AT_PICKUP:'aceptado',
-          PICKED_UP:'retirado',
-          GOING_TO_DELIVERY:'en_camino',
-          ARRIVED_AT_DELIVERY:'en_camino'
-        }[next];
-        await client.query(`UPDATE orders SET delivery_status=$2,status=COALESCE($3,status),picked_up_at=CASE WHEN $2='PICKED_UP' THEN COALESCE(picked_up_at,NOW()) ELSE picked_up_at END,updated_at=NOW() WHERE id=$1`,[job.source_id,next,foodStatus||null]);
-      }
+      if(job.source_type==='FOOD_ORDER') await client.query('UPDATE orders SET delivery_status=$2,status=CASE WHEN $2=\'DELIVERED\' THEN \'entregado\' ELSE status END,updated_at=NOW() WHERE id=$1',[job.source_id,next]);
       if(delivered){
         await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
         if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
@@ -345,8 +336,6 @@ module.exports = function crearRutasDrivers({ pool }) {
         if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[order.id]);await client.query('COMMIT');return res.status(400).json({ok:false,message:'Código incorrecto.'});}
         const q=await client.query(`UPDATE bhuz_delivery_jobs SET status='DELIVERED',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId]);
         await client.query(`UPDATE orders SET status='entregado',delivery_status='DELIVERED',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[order.id,req.params.driverId]);
-        await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
-        if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
         await client.query(`UPDATE bhuz_drivers SET operational_status='AVAILABLE',is_available=TRUE,completed_deliveries=completed_deliveries+1,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
         await client.query('COMMIT');
         try{const updated=(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0];await sendOrderStatus(pool,updated,'Pedido entregado','Tu pedido fue entregado. ¡Buen provecho!')}catch(pushErr){console.warn('Push omitido:',pushErr.message)}
