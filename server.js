@@ -29,6 +29,7 @@ const crearRutasServices = require("./routes/services.routes");
 const crearRutasDrivers = require("./routes/drivers.routes");
 const crearRutasTracking = require("./routes/tracking.routes");
 const crearRutasRatings = require("./routes/ratings.routes");
+const { createAuthMiddleware } = require("./middleware/auth.middleware");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -144,6 +145,18 @@ async function initDatabaseTables() {
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+    `);
+
+    await pool.query(`
+      ALTER TABLE orders
+      ADD COLUMN IF NOT EXISTS public_order_number TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code_hash TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code_plain TEXT,
+      ADD COLUMN IF NOT EXISTS delivery_code_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS delivery_code_attempts INTEGER DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS delivered_by_driver_id TEXT,
+      ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
     `);
 
     await pool.query(`
@@ -933,6 +946,9 @@ function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
 
   return {
     id: orderRow.id || "",
+    orderNumber: orderRow.public_order_number || String(orderRow.id || "").replace(/\D/g, "").slice(-6).padStart(6, "0"),
+    deliveryCode: orderRow.delivery_code_plain || "",
+    deliveryCodeVerifiedAt: orderRow.delivery_code_verified_at || null,
     userId: orderRow.user_id || "",
     restaurantEmail: normalizeEmail(orderRow.restaurant_email),
     restaurantName: orderRow.restaurant_name || "Restaurante",
@@ -1174,6 +1190,9 @@ async function createOrderInPostgres(body) {
     }
 
     const id = String(body.id || generateId("order")).trim();
+    const publicOrderNumber = String(id).replace(/\D/g, "").slice(-6).padStart(6, "0");
+    const deliveryCode = String(crypto.randomInt(100000, 1000000));
+    const deliveryCodeHash = await hashPassword(deliveryCode);
     const normalizedItems = items.map((item) => {
       const quantity = toNumberValue(item.qty ?? item.quantity, 1);
       const price = toNumberValue(item.price ?? item.unitPrice, 0);
@@ -1196,9 +1215,9 @@ async function createOrderInPostgres(body) {
         id, user_id, customer_email, customer_name, customer_phone, customer_address,
         restaurant_id, restaurant_email, restaurant_name, status, total,
         payment_method, payment_status, notes, delivery_address, delivery_reference,
-        latitude, longitude, date_text, time_text, created_at, updated_at
+        latitude, longitude, date_text, time_text, public_order_number, delivery_code_hash, delivery_code_plain, created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
       RETURNING *
       `,
       [
@@ -1222,6 +1241,9 @@ async function createOrderInPostgres(body) {
         normalizeText(body.longitude || body.location?.lng || customer.location?.lng || ""),
         normalizeText(body.date || new Date(createdAt).toLocaleDateString("es-VE")),
         normalizeText(body.time || new Date(createdAt).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })),
+        publicOrderNumber,
+        deliveryCodeHash,
+        deliveryCode,
         createdAt
       ]
     );
@@ -1249,7 +1271,8 @@ async function createOrderInPostgres(body) {
     }
 
     await client.query("COMMIT");
-    return await getOrderByIdFromPostgres(id);
+    const createdOrder = await getOrderByIdFromPostgres(id);
+    return { ...createdOrder, deliveryCode };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -1282,7 +1305,8 @@ function createSession(res, user, type = "user") {
     type,
     email: normalizeEmail(user.email),
     role: user.role || type,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString()
   };
 
   writeJsonObjectFile(SESSIONS_FILE, sessions);
@@ -1327,6 +1351,11 @@ async function getSessionUser(req) {
   const sessions = readJsonObjectFile(SESSIONS_FILE);
   const session = sessions[sessionId];
   if (!session) return null;
+  if (!session.expiresAt || new Date(session.expiresAt).getTime() <= Date.now()) {
+    delete sessions[sessionId];
+    writeJsonObjectFile(SESSIONS_FILE, sessions);
+    return null;
+  }
 
   if (session.type === "admin") {
     const result = await pool.query(
@@ -1357,6 +1386,8 @@ async function getSessionUser(req) {
   const user = await getUserByEmailFromPostgres(session.email);
   return user ? { type: "user", user: { ...user, role: "customer" } } : null;
 }
+
+const authMiddleware = createAuthMiddleware({ getSessionUser });
 
 /* ======================================================
    RUTAS DE PRUEBA
@@ -2690,7 +2721,8 @@ app.use("/orders", crearRutasPedidos({
   normalizeOrderStatus,
   createOrderInPostgres,
   getOrdersFromPostgres,
-  getOrderByIdFromPostgres
+  getOrderByIdFromPostgres,
+  authMiddleware
 }));
 
 
