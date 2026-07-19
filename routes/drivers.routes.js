@@ -12,42 +12,6 @@ module.exports = function crearRutasDrivers({ pool }) {
   const r = express.Router();
 
   let schemaReadyPromise = null;
-
-  async function ensureFoodOrderDeliveryCode(orderId, clientOrPool = pool) {
-    await clientOrPool.query(`
-      ALTER TABLE orders
-        ADD COLUMN IF NOT EXISTS delivery_code VARCHAR(6),
-        ADD COLUMN IF NOT EXISTS delivery_code_hash TEXT,
-        ADD COLUMN IF NOT EXISTS delivery_code_plain TEXT,
-        ADD COLUMN IF NOT EXISTS delivery_code_verified_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS delivery_code_attempts INTEGER DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS delivered_by_driver_id TEXT;
-    `);
-
-    const found = await clientOrPool.query(
-      `SELECT id, delivery_code, delivery_code_plain, delivery_code_verified_at
-       FROM orders WHERE id=$1 LIMIT 1`,
-      [orderId]
-    );
-    const order = found.rows[0];
-    if (!order || order.delivery_code_verified_at) return order || null;
-
-    let code = String(order.delivery_code || order.delivery_code_plain || '').trim();
-    if (!/^\d{6}$/.test(code)) {
-      code = String(crypto.randomInt(100000, 1000000));
-      const hash = await hashPassword(code);
-      const updated = await clientOrPool.query(
-        `UPDATE orders
-         SET delivery_code=$2, delivery_code_plain=$2, delivery_code_hash=$3,
-             delivery_code_attempts=0, updated_at=NOW()
-         WHERE id=$1 AND delivery_code_verified_at IS NULL
-         RETURNING *`,
-        [orderId, code, hash]
-      );
-      return updated.rows[0] || order;
-    }
-    return order;
-  }
   async function ensureDriverSchema() {
     if (schemaReadyPromise) return schemaReadyPromise;
     schemaReadyPromise = pool.query(`
@@ -220,18 +184,6 @@ module.exports = function crearRutasDrivers({ pool }) {
   r.get('/:driverId/dashboard', async(req,res)=>{
     try {
       await ensureDriverSchema();
-      // Repara automáticamente pedidos de comida antiguos que quedaron sin clave.
-      const missingFoodCodes = await pool.query(`
-        SELECT DISTINCT o.id
-        FROM orders o
-        JOIN bhuz_delivery_jobs j ON j.source_type='FOOD_ORDER' AND j.source_id=o.id
-        WHERE j.status NOT IN ('DELIVERED','CANCELLED')
-          AND o.delivery_code_verified_at IS NULL
-          AND COALESCE(NULLIF(o.delivery_code,''),NULLIF(o.delivery_code_plain,'')) IS NULL
-      `).catch(() => ({ rows: [] }));
-      for (const row of missingFoodCodes.rows) {
-        await ensureFoodOrderDeliveryCode(row.id).catch(error => console.warn('Clave comida omitida:', error.message));
-      }
       const driver=await ensureDriver(req.params.driverId,{});
       // La sincronización de paquetes no debe impedir que el repartidor abra su panel.
       try {
@@ -351,7 +303,16 @@ module.exports = function crearRutasDrivers({ pool }) {
       }
       const delivered=next==='DELIVERED'; const q=await client.query(`UPDATE bhuz_delivery_jobs SET status=$3,picked_up_at=CASE WHEN $3='PICKED_UP' THEN NOW() ELSE picked_up_at END,delivered_at=CASE WHEN $3='DELIVERED' THEN NOW() ELSE delivered_at END,updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId,next]);
       if(job.source_type==='PACKAGE') { const sm={GOING_TO_PICKUP:'GOING_TO_PICKUP',PICKED_UP:'PACKAGE_PICKED',GOING_TO_DELIVERY:'GOING_TO_DELIVERY'}; if(sm[next]) await client.query('UPDATE bhuz_services SET status=$2,updated_at=NOW() WHERE id=$1',[job.source_id,sm[next]]); }
-      if(job.source_type==='FOOD_ORDER') await client.query('UPDATE orders SET delivery_status=$2,status=CASE WHEN $2=\'DELIVERED\' THEN \'entregado\' ELSE status END,updated_at=NOW() WHERE id=$1',[job.source_id,next]);
+      if(job.source_type==='FOOD_ORDER') {
+        const foodStatus={
+          GOING_TO_PICKUP:'aceptado',
+          ARRIVED_AT_PICKUP:'aceptado',
+          PICKED_UP:'retirado',
+          GOING_TO_DELIVERY:'en_camino',
+          ARRIVED_AT_DELIVERY:'en_camino'
+        }[next];
+        await client.query(`UPDATE orders SET delivery_status=$2,status=COALESCE($3,status),picked_up_at=CASE WHEN $2='PICKED_UP' THEN COALESCE(picked_up_at,NOW()) ELSE picked_up_at END,updated_at=NOW() WHERE id=$1`,[job.source_id,next,foodStatus||null]);
+      }
       if(delivered){
         await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
         if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
@@ -375,7 +336,6 @@ module.exports = function crearRutasDrivers({ pool }) {
       if(!['PACKAGE','FOOD_ORDER'].includes(job.source_type)){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este servicio no admite confirmación por código.'});}
       if(!['GOING_TO_DELIVERY','ARRIVED_AT_DELIVERY'].includes(job.status)){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Primero debes llegar al destino para confirmar la entrega.'});}
       if(job.source_type==='FOOD_ORDER'){
-        await ensureFoodOrderDeliveryCode(job.source_id, client);
         const order=(await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[job.source_id])).rows[0];
         if(!order){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Pedido no encontrado.'});}
         if(order.delivery_code_verified_at){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este código ya fue utilizado.'});}
@@ -385,6 +345,8 @@ module.exports = function crearRutasDrivers({ pool }) {
         if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[order.id]);await client.query('COMMIT');return res.status(400).json({ok:false,message:'Código incorrecto.'});}
         const q=await client.query(`UPDATE bhuz_delivery_jobs SET status='DELIVERED',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId]);
         await client.query(`UPDATE orders SET status='entregado',delivery_status='DELIVERED',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[order.id,req.params.driverId]);
+        await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'EARNING','CREDIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.driver_earning),job.currency||'USD',`Ganancia por entrega ${job.id}`]);
+        if(job.payment_received_by==='DRIVER') await client.query(`INSERT INTO bhuz_driver_ledger(id,driver_id,delivery_job_id,movement_type,direction,amount,currency,base_amount,base_currency,description) VALUES($1,$2,$3,'CASH_COLLECTED','DEBIT_DRIVER',$4,$5,$4,$5,$6)`,[id('mov'),req.params.driverId,job.id,num(job.service_total),job.currency||'USD',`Efectivo cobrado en ${job.id}`]);
         await client.query(`UPDATE bhuz_drivers SET operational_status='AVAILABLE',is_available=TRUE,completed_deliveries=completed_deliveries+1,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
         await client.query('COMMIT');
         try{const updated=(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0];await sendOrderStatus(pool,updated,'Pedido entregado','Tu pedido fue entregado. ¡Buen provecho!')}catch(pushErr){console.warn('Push omitido:',pushErr.message)}
@@ -444,7 +406,7 @@ module.exports = function crearRutasDrivers({ pool }) {
   });
 
   r.post('/sync/order/:orderId', async(req,res)=>{
-    try { await ensureFoodOrderDeliveryCode(req.params.orderId); const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.orderId])).rows[0]; if(!o)return res.status(404).json({ok:false,message:'Pedido no encontrado.'}); const earning=num(req.body?.driverEarning,Math.max(1.5,num(o.total)*0.10));
+    try { const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.orderId])).rows[0]; if(!o)return res.status(404).json({ok:false,message:'Pedido no encontrado.'}); const earning=num(req.body?.driverEarning,Math.max(1.5,num(o.total)*0.10));
       const q=await pool.query(`INSERT INTO bhuz_delivery_jobs(id,source_type,source_id,status,pickup_name,pickup_address,delivery_name,delivery_address,delivery_reference,delivery_latitude,delivery_longitude,service_total,driver_earning,currency,payment_method,payment_received_by,estimated_pickup_at)
       VALUES($1,'FOOD_ORDER',$2,'PENDING_ASSIGNMENT',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT(source_type,source_id) DO UPDATE SET status=CASE WHEN bhuz_delivery_jobs.status IN ('DELIVERED','CANCELLED') THEN bhuz_delivery_jobs.status ELSE 'PENDING_ASSIGNMENT' END,updated_at=NOW() RETURNING *`,[id('job'),o.id,o.restaurant_name||'Restaurante',req.body?.restaurantAddress||'',o.customer_name||'Cliente',o.delivery_address||o.customer_address,o.delivery_reference,o.latitude,o.longitude,o.total,earning,req.body?.currency||'USD',o.payment_method||'',req.body?.paymentReceivedBy||'BHUZ',req.body?.estimatedPickupAt||null]);

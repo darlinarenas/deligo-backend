@@ -47,41 +47,25 @@ function statusNotice(status, restaurantName="el restaurante") {
 
 async function ensureCustomerDeliveryCodes(pool, orders = []) {
   await ensureOrderDeliverySchema(pool);
-
   for (const order of orders) {
     const status = String(order.status || "").toLowerCase();
-    if (["entregado", "cancelado"].includes(status)) continue;
+    if (["entregado", "cancelado"].includes(status) || order.deliveryCode) continue;
 
-    // Primero leer la fuente real. Paquetes trabaja con una clave directa en BD;
-    // comida queda igual: una clave directa de 6 dígitos en orders.delivery_code.
-    const current = await pool.query(
-      `SELECT delivery_code, delivery_code_plain, delivery_code_verified_at
-       FROM orders WHERE id = $1 LIMIT 1`,
-      [order.id]
+    const code = String(crypto.randomInt(100000, 1000000));
+    const hash = await hashPassword(code);
+    const result = await pool.query(
+      `UPDATE orders
+       SET delivery_code = $2,
+           delivery_code_hash = $3,
+           delivery_code_plain = $2,
+           delivery_code_attempts = 0,
+           updated_at = NOW()
+       WHERE id = $1
+         AND delivery_code_verified_at IS NULL
+       RETURNING delivery_code`,
+      [order.id, code, hash]
     );
-    const row = current.rows[0] || {};
-    let code = String(row.delivery_code || row.delivery_code_plain || "").trim();
-
-    if (!/^\d{6}$/.test(code) && !row.delivery_code_verified_at) {
-      code = String(crypto.randomInt(100000, 1000000));
-      const hash = await hashPassword(code);
-      const updated = await pool.query(
-        `UPDATE orders
-         SET delivery_code = $2,
-             delivery_code_hash = $3,
-             delivery_code_plain = $2,
-             delivery_code_attempts = 0,
-             updated_at = NOW()
-         WHERE id = $1
-           AND delivery_code_verified_at IS NULL
-         RETURNING delivery_code`,
-        [order.id, code, hash]
-      );
-      code = String(updated.rows[0]?.delivery_code || code).trim();
-    }
-
-    order.deliveryCode = /^\d{6}$/.test(code) ? code : "";
-    order.delivery_code = order.deliveryCode;
+    order.deliveryCode = result.rows[0]?.delivery_code || code;
   }
   return orders;
 }
@@ -93,8 +77,6 @@ function crearRutasPedidos(dependencias) {
 
   router.post("/", ...requireRole("customer"), async (req, res) => {
     try {
-      // Igual que paquetes: la columna y la clave deben existir antes de insertar.
-      await ensureOrderDeliverySchema(pool);
       const trusted = req.auth.user;
       const body = { ...(req.body || {}), userId: trusted.id, customerEmail: trusted.email, customer: { ...(req.body?.customer || {}), email: trusted.email, fullName: trusted.fullName || trusted.name, phone: trusted.phone } };
       const newOrder = await createOrderInPostgres(body);
@@ -167,6 +149,57 @@ function crearRutasPedidos(dependencias) {
       } else if(newStatus==="cancelado" && !["customer","restaurant","admin"].includes(role)) {await client.query("ROLLBACK");return res.status(403).json({ok:false,message:"No autorizado."});}
 
       await client.query(`UPDATE orders SET status=$1, ready_at=CASE WHEN $1='listo' THEN COALESCE(ready_at,NOW()) ELSE ready_at END, picked_up_at=CASE WHEN $1='retirado' THEN COALESCE(picked_up_at,NOW()) ELSE picked_up_at END, updated_at=NOW() WHERE id=$2`,[newStatus,orderId]);
+
+      // Al aceptar comida se crea una sola tarea de reparto, usando la misma
+      // estructura estable de paquetería pero manteniendo source_type FOOD_ORDER.
+      if(newStatus==="aceptado"){
+        const earning=Math.max(1.5,Math.round(Number(order.total||0)*0.10*100)/100);
+        const jobId=`job_${order.id}`;
+        const jobResult=await client.query(`
+          INSERT INTO bhuz_delivery_jobs(
+            id,source_type,source_id,status,
+            pickup_name,pickup_address,
+            delivery_name,delivery_address,delivery_reference,
+            delivery_latitude,delivery_longitude,
+            service_total,driver_earning,currency,payment_method,payment_received_by
+          ) VALUES(
+            $1,'FOOD_ORDER',$2,'PENDING_ASSIGNMENT',
+            $3,$4,$5,$6,$7,$8,$9,$10,$11,'USD',$12,'BHUZ'
+          )
+          ON CONFLICT(source_type,source_id) DO UPDATE SET
+            pickup_name=EXCLUDED.pickup_name,
+            pickup_address=EXCLUDED.pickup_address,
+            delivery_name=EXCLUDED.delivery_name,
+            delivery_address=EXCLUDED.delivery_address,
+            delivery_reference=EXCLUDED.delivery_reference,
+            delivery_latitude=EXCLUDED.delivery_latitude,
+            delivery_longitude=EXCLUDED.delivery_longitude,
+            service_total=EXCLUDED.service_total,
+            driver_earning=EXCLUDED.driver_earning,
+            payment_method=EXCLUDED.payment_method,
+            status=CASE
+              WHEN bhuz_delivery_jobs.status IN ('DELIVERED','CANCELLED') THEN bhuz_delivery_jobs.status
+              ELSE bhuz_delivery_jobs.status
+            END,
+            updated_at=NOW()
+          RETURNING id,status,driver_earning
+        `,[
+          jobId,order.id,
+          order.restaurant_name||"Restaurante",order.restaurant_address||"",
+          order.customer_name||"Cliente",order.delivery_address||order.customer_address||"",
+          order.delivery_reference||"",order.latitude||null,order.longitude||null,
+          Number(order.total||0),earning,order.payment_method||""
+        ]);
+        const job=jobResult.rows[0];
+        await client.query(`UPDATE orders SET delivery_job_id=$2,delivery_status=$3,driver_earning=$4,updated_at=NOW() WHERE id=$1`,[order.id,job.id,job.status,job.driver_earning]);
+      }
+
+      // Si el pedido se cancela antes de ser entregado, también se cierra la tarea pendiente.
+      if(newStatus==="cancelado"){
+        await client.query(`UPDATE bhuz_delivery_jobs SET status='CANCELLED',updated_at=NOW() WHERE source_type='FOOD_ORDER' AND source_id=$1 AND status NOT IN ('DELIVERED','CANCELLED')`,[order.id]);
+        await client.query(`UPDATE orders SET delivery_status='CANCELLED',updated_at=NOW() WHERE id=$1`,[order.id]);
+      }
+
       await client.query("COMMIT");
       const updated=await getOrderByIdFromPostgres(orderId);
       const [title,message]=statusNotice(newStatus,updated.restaurantName);
