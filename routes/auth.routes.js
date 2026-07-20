@@ -1,4 +1,5 @@
 const express = require("express");
+const { verifyPassword } = require("../utils/passwords");
 
 /* ======================================================
    RUTAS AUTH / SESIÓN
@@ -343,10 +344,11 @@ function crearRutasAuth(dependencias) {
         const restaurant =
           await getRestaurantByEmailFromPostgres(normalizedEmail);
 
-        if (
-          !restaurant ||
-          String(restaurant.password) !== String(password)
-        ) {
+        const validPassword = restaurant
+          ? await verifyPassword(password, restaurant.password)
+          : false;
+
+        if (!restaurant || !validPassword) {
           return res.status(401).json({
             ok: false,
             message: "Datos inválidos para restaurante"
@@ -384,7 +386,11 @@ function crearRutasAuth(dependencias) {
       const user =
         await getUserByEmailFromPostgres(normalizedEmail);
 
-      if (!user || String(user.password) !== String(password)) {
+      const validPassword = user
+        ? await verifyPassword(password, user.password)
+        : false;
+
+      if (!user || !validPassword) {
         return res.status(401).json({
           ok: false,
           message: "Correo o contraseña incorrectos"
