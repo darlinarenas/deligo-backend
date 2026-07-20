@@ -1,13 +1,14 @@
 const webpush = require("web-push");
-const { getVapidDetails } = require("./vapid");
 
 let configured = false;
 let schemaPromise = null;
 
 function configureWebPush() {
   if (configured) return true;
-  const { configured: vapidConfigured, publicKey, privateKey, subject } = getVapidDetails();
-  if (!vapidConfigured) return false;
+  const publicKey = String(process.env.VAPID_PUBLIC_KEY || "").trim();
+  const privateKey = String(process.env.VAPID_PRIVATE_KEY || "").trim();
+  const subject = String(process.env.VAPID_SUBJECT || "mailto:soporte@bhuz.app").trim();
+  if (!publicKey || !privateKey) return false;
   webpush.setVapidDetails(subject, publicKey, privateKey);
   configured = true;
   return true;

@@ -1,4 +1,3 @@
-const { hashPassword, verifyAndUpgradePassword } = require("../utils/passwords");
 const express = require("express");
 
 /* ======================================================
@@ -50,16 +49,7 @@ router.post("/login", async (req, res) => {
 
     const adminRow = result.rows[0];
 
-    const validPassword = adminRow && await verifyAndUpgradePassword({
-      password,
-      storedPassword: adminRow.password,
-      onUpgrade: (hash) => pool.query(
-        `UPDATE admins SET password = $1, updated_at = NOW() WHERE id = $2`,
-        [hash, adminRow.id]
-      )
-    });
-
-    if (!adminRow || !validPassword) {
+    if (!adminRow || String(adminRow.password) !== String(password)) {
       return res.status(401).json({
         ok: false,
         message: "Credenciales inválidas"
@@ -70,6 +60,7 @@ router.post("/login", async (req, res) => {
       id: adminRow.id || "",
       name: adminRow.name || "Administrador",
       email: normalizeEmail(adminRow.email),
+      password: adminRow.password || "",
       role: adminRow.role || "admin",
       status: adminRow.status || "active"
     };
@@ -260,7 +251,7 @@ router.patch("/users/:id", async (req, res) => {
         body.reference != null ? normalizeText(body.reference) : (current.reference || ""),
         body.location?.lat ?? current.latitude ?? "",
         body.location?.lng ?? current.longitude ?? "",
-        body.password != null && String(body.password).trim() ? await hashPassword(String(body.password)) : (current.password || ""),
+        body.password != null && String(body.password).trim() ? String(body.password) : (current.password || ""),
         current.id
       ]
     );
@@ -382,7 +373,7 @@ router.patch("/restaurantes/:id", async (req, res) => {
         body.description != null ? normalizeText(body.description) : (current.description || ""),
         status,
         commissionPercent,
-        body.password != null && String(body.password).trim() ? await hashPassword(String(body.password)) : (current.password || ""),
+        body.password != null && String(body.password).trim() ? String(body.password) : (current.password || ""),
         current.id
       ]
     );

@@ -1,187 +1,267 @@
 const express = require("express");
-const crypto = require("crypto");
-const { verifyPassword, hashPassword } = require("../utils/passwords");
-const { sendOrderStatus } = require("../utils/push-notifications");
 
-const TRANSITIONS = {
-  pendiente: ["aceptado", "cancelado"],
-  aceptado: ["preparando", "cancelado"],
-  preparando: ["listo", "cancelado"],
-  listo: ["retirado"],
-  retirado: ["en_camino"],
-  en_camino: ["entregado"]
-};
-const RESTAURANT_STATES = new Set(["aceptado", "preparando", "listo", "retirado"]);
-const DRIVER_STATES = new Set(["en_camino", "entregado"]);
-
-let deliverySchemaPromise = null;
-async function ensureOrderDeliverySchema(pool) {
-  if (deliverySchemaPromise) return deliverySchemaPromise;
-  deliverySchemaPromise = pool.query(`
-    ALTER TABLE orders
-      ADD COLUMN IF NOT EXISTS delivery_code VARCHAR(6),
-      ADD COLUMN IF NOT EXISTS delivery_code_hash TEXT,
-      ADD COLUMN IF NOT EXISTS delivery_code_plain TEXT,
-      ADD COLUMN IF NOT EXISTS delivery_code_verified_at TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS delivery_code_attempts INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS delivered_by_driver_id TEXT;
-    UPDATE orders
-       SET delivery_code = COALESCE(NULLIF(delivery_code, ''), NULLIF(delivery_code_plain, ''))
-     WHERE delivery_code IS NULL OR delivery_code = '';
-  `).catch(error => { deliverySchemaPromise = null; throw error; });
-  return deliverySchemaPromise;
-}
-
-function statusNotice(status, restaurantName="el restaurante") {
-  const map = {
-    aceptado: ["Pedido aceptado", `${restaurantName} aceptó tu pedido.`],
-    preparando: ["Pedido en preparación", `${restaurantName} está preparando tu pedido.`],
-    listo: ["Pedido listo", "Tu pedido está listo para ser retirado."],
-    retirado: ["Pedido retirado", "El repartidor retiró tu pedido del local."],
-    en_camino: ["Tu pedido va en camino", "El repartidor ya va hacia tu ubicación."],
-    entregado: ["Pedido entregado", "Tu pedido fue entregado. ¡Buen provecho!"],
-    cancelado: ["Pedido cancelado", "Tu pedido fue cancelado."]
-  };
-  return map[status] || ["Pedido actualizado", "Tu pedido cambió de estado."];
-}
-
-async function ensureCustomerDeliveryCodes(pool, orders = []) {
-  await ensureOrderDeliverySchema(pool);
-  for (const order of orders) {
-    const status = String(order.status || "").toLowerCase();
-    if (["entregado", "cancelado"].includes(status) || order.deliveryCode) continue;
-
-    const code = String(crypto.randomInt(100000, 1000000));
-    const hash = await hashPassword(code);
-    const result = await pool.query(
-      `UPDATE orders
-       SET delivery_code = $2,
-           delivery_code_hash = $3,
-           delivery_code_plain = $2,
-           delivery_code_attempts = 0,
-           updated_at = NOW()
-       WHERE id = $1
-         AND delivery_code_verified_at IS NULL
-       RETURNING delivery_code`,
-      [order.id, code, hash]
-    );
-    order.deliveryCode = result.rows[0]?.delivery_code || code;
-  }
-  return orders;
-}
+/* ======================================================
+   RUTAS PEDIDOS
+   - Este archivo separa SOLO las rutas de pedidos.
+   - Mantiene la lógica real que ya funcionaba en server.js.
+   - No cambia respuestas del frontend.
+   - No toca auth, restaurantes, usuarios, admin ni estadísticas.
+====================================================== */
 
 function crearRutasPedidos(dependencias) {
   const router = express.Router();
-  const { pool, normalizeEmail, normalizeOrderStatus, createOrderInPostgres, getOrdersFromPostgres, getOrderByIdFromPostgres, authMiddleware } = dependencias;
-  const { requireAuth, requireRole, requireOwnerEmail } = authMiddleware;
 
-  router.post("/", ...requireRole("customer"), async (req, res) => {
+  const {
+    pool,
+    normalizeEmail,
+    normalizeOrderStatus,
+    createOrderInPostgres,
+    getOrdersFromPostgres,
+    getOrderByIdFromPostgres
+  } = dependencias;
+
+  /* ======================================================
+     POST /orders
+     Crea pedido en PostgreSQL usando orders + order_items.
+  ====================================================== */
+  router.post("/", async (req, res) => {
     try {
-      const trusted = req.auth.user;
-      const body = { ...(req.body || {}), userId: trusted.id, customerEmail: trusted.email, customer: { ...(req.body?.customer || {}), email: trusted.email, fullName: trusted.fullName || trusted.name, phone: trusted.phone } };
-      const newOrder = await createOrderInPostgres(body);
-      return res.status(201).json({ ok:true, source:"postgres", message:"Pedido creado correctamente", order:newOrder });
-    } catch (error) { return res.status(error.statusCode||500).json({ok:false,message:error.message||"Error creando pedido"}); }
-  });
+      const newOrder = await createOrderInPostgres(req.body || {});
 
-  router.get("/", ...requireRole("admin"), async (req,res)=>{
-    try { const orders=(await getOrdersFromPostgres()).map(({deliveryCode,...order})=>order); return res.json(orders); }
-    catch(error){ return res.status(500).json({ok:false,message:"Error leyendo pedidos"}); }
-  });
+      return res.status(201).json({
+        ok: true,
+        source: "postgres",
+        message: "Pedido creado correctamente",
+        order: newOrder
+      });
+    } catch (error) {
+      console.error("Error creando pedido en PostgreSQL:", error.message);
 
-  router.get("/me", ...requireRole("customer"), async(req,res)=>{
-    const orders=await getOrdersFromPostgres({customerEmail:req.auth.user.email});
-    await ensureCustomerDeliveryCodes(pool, orders);
-    res.set("Cache-Control", "no-store");
-    res.json({ok:true,source:"postgres",total:orders.length,orders});
-  });
-
-
-  router.get("/:id/delivery-code", ...requireRole("customer"), async(req,res)=>{
-    try{
-      const orderId=String(req.params.id||"").trim();
-      const found=await getOrderByIdFromPostgres(orderId);
-      if(!found) return res.status(404).json({ok:false,message:"Pedido no encontrado"});
-      if(normalizeEmail(found.customerEmail)!==normalizeEmail(req.auth.user.email)) return res.status(403).json({ok:false,message:"Este pedido no pertenece a tu cuenta."});
-      if(["entregado","cancelado"].includes(normalizeOrderStatus(found.status))) return res.status(409).json({ok:false,message:"Este pedido ya no requiere clave de entrega."});
-      await ensureCustomerDeliveryCodes(pool,[found]);
-      return res.json({ok:true,deliveryCode:found.deliveryCode,orderNumber:found.orderNumber});
-    }catch(error){
-      console.error("Código de entrega:",error);
-      return res.status(500).json({ok:false,message:"No se pudo generar la clave de entrega."});
+      return res.status(error.statusCode || 500).json({
+        ok: false,
+        message: error.message || "Error creando pedido en PostgreSQL"
+      });
     }
   });
 
-  router.get("/restaurant/me", ...requireRole("restaurant"), async(req,res)=>{
-    const orders=(await getOrdersFromPostgres({restaurantEmail:req.auth.user.email})).map(({deliveryCode,...order})=>order);
-    res.json({ok:true,source:"postgres",total:orders.length,orders});
+  /* ======================================================
+     GET /orders
+     Lee todos los pedidos desde PostgreSQL.
+     IMPORTANTE:
+     Se mantiene la respuesta como arreglo directo porque así estaba.
+  ====================================================== */
+  router.get("/", async (req, res) => {
+    try {
+      const orders = await getOrdersFromPostgres();
+      return res.json(orders);
+    } catch (error) {
+      console.error("Error leyendo pedidos desde PostgreSQL:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error leyendo pedidos desde PostgreSQL",
+        error: error.message
+      });
+    }
   });
 
-  // Compatibilidad temporal: se valida que el correo de la URL sea el de la sesión.
-  router.get("/restaurant/:email", ...requireRole("restaurant"), requireOwnerEmail("email"), async(req,res)=>{
-    const orders=(await getOrdersFromPostgres({restaurantEmail:req.auth.user.email})).map(({deliveryCode,...order})=>order);
-    res.json({ok:true,source:"postgres",total:orders.length,orders});
-  });
-  router.get("/customer/:email", ...requireRole("customer"), requireOwnerEmail("email"), async(req,res)=>{
-    const orders=await getOrdersFromPostgres({customerEmail:req.auth.user.email});
-    await ensureCustomerDeliveryCodes(pool, orders);
-    res.set("Cache-Control", "no-store");
-    res.json({ok:true,source:"postgres",total:orders.length,orders});
+  /* ======================================================
+     GET /orders/restaurant/:email
+     Lee pedidos por restaurante.
+  ====================================================== */
+  router.get("/restaurant/:email", async (req, res) => {
+    const email = normalizeEmail(req.params.email);
+
+    try {
+      const orders = await getOrdersFromPostgres({ restaurantEmail: email });
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        total: orders.length,
+        orders
+      });
+    } catch (error) {
+      console.error("Error leyendo pedidos del restaurante desde PostgreSQL:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error leyendo pedidos del restaurante desde PostgreSQL",
+        error: error.message
+      });
+    }
   });
 
-  router.patch("/:id/status", requireAuth, async (req,res)=>{
-    const orderId=String(req.params.id||"").trim();
-    const newStatus=normalizeOrderStatus(req.body?.status);
-    const client=await pool.connect();
+  /* ======================================================
+     GET /orders/customer/:email
+     Lee pedidos por cliente.
+  ====================================================== */
+  router.get("/customer/:email", async (req, res) => {
+    const email = normalizeEmail(req.params.email);
+
+    try {
+      const orders = await getOrdersFromPostgres({ customerEmail: email });
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        total: orders.length,
+        orders
+      });
+    } catch (error) {
+      console.error("Error leyendo pedidos del cliente desde PostgreSQL:", error.message);
+
+      return res.status(500).json({
+        ok: false,
+        message: "Error leyendo pedidos del cliente desde PostgreSQL",
+        error: error.message
+      });
+    }
+  });
+
+  /* ======================================================
+     PATCH /orders/:id/status
+     Cambia estado de pedido.
+  ====================================================== */
+  router.patch("/:id/status", async (req, res) => {
+    const orderId = String(req.params.id || "").trim();
+    const normalizedStatus = normalizeOrderStatus(req.body?.status);
+
+    const validStatuses = [
+      "pendiente",
+      "aceptado",
+      "preparando",
+      "listo",
+      "en_camino",
+      "entregado"
+    ];
+
+    if (!validStatuses.includes(normalizedStatus)) {
+      return res.status(400).json({ ok: false, message: "Estado inválido" });
+    }
+
+    const client = await pool.connect();
+
     try {
       await client.query("BEGIN");
-      const found=await client.query(`SELECT * FROM orders WHERE id=$1 FOR UPDATE`,[orderId]);
-      const order=found.rows[0];
-      if(!order){await client.query("ROLLBACK");return res.status(404).json({ok:false,message:"Pedido no encontrado"});}
-      const current=normalizeOrderStatus(order.status);
-      if(!(TRANSITIONS[current]||[]).includes(newStatus)){await client.query("ROLLBACK");return res.status(409).json({ok:false,message:`Transición no permitida: ${current} → ${newStatus}`});}
-      const role=req.auth.role;
-      if(RESTAURANT_STATES.has(newStatus)){
-        if(role!=="restaurant" || normalizeEmail(req.auth.user.email)!==normalizeEmail(order.restaurant_email)){await client.query("ROLLBACK");return res.status(403).json({ok:false,message:"Solo el restaurante de este pedido puede cambiar ese estado."});}
-      } else if(DRIVER_STATES.has(newStatus)) {
-        if(role!=="driver" && role!=="admin"){await client.query("ROLLBACK");return res.status(403).json({ok:false,message:"Solo el repartidor asignado puede cambiar ese estado."});}
-        if(role==="driver" && order.driver_id && String(order.driver_id)!==String(req.auth.user.id)){await client.query("ROLLBACK");return res.status(403).json({ok:false,message:"Este pedido pertenece a otro repartidor."});}
-      } else if(newStatus==="cancelado" && !["customer","restaurant","admin"].includes(role)) {await client.query("ROLLBACK");return res.status(403).json({ok:false,message:"No autorizado."});}
 
-      await client.query(`UPDATE orders SET status=$1, ready_at=CASE WHEN $1='listo' THEN COALESCE(ready_at,NOW()) ELSE ready_at END, picked_up_at=CASE WHEN $1='retirado' THEN COALESCE(picked_up_at,NOW()) ELSE picked_up_at END, updated_at=NOW() WHERE id=$2`,[newStatus,orderId]);
-      await client.query("COMMIT");
-      const updated=await getOrderByIdFromPostgres(orderId);
-      const [title,message]=statusNotice(newStatus,updated.restaurantName);
-      sendOrderStatus(pool,{...updated,customer_email:updated.customerEmail},title,message).catch(err=>console.warn("Push pedido:",err.message));
-      res.json({ok:true,source:"postgres",message:"Estado actualizado correctamente",order:updated});
-    } catch(error){await client.query("ROLLBACK");res.status(500).json({ok:false,message:"Error actualizando estado",error:error.message});}
-    finally{client.release();}
-  });
+      const result = await client.query(
+        `
+        UPDATE orders
+        SET
+          status = $1,
+          ready_at = CASE WHEN $1 = 'listo' THEN COALESCE(ready_at, NOW()) ELSE ready_at END,
+          updated_at = NOW()
+        WHERE id = $2
+        RETURNING *
+        `,
+        [normalizedStatus, orderId]
+      );
 
-  router.post("/:id/confirm-delivery", ...requireRole("driver","admin"), async(req,res)=>{
-    const orderId=String(req.params.id||"").trim();
-    const code=String(req.body?.code||"").trim();
-    if(!/^\d{6}$/.test(code)) return res.status(400).json({ok:false,message:"Ingresa el código de 6 dígitos."});
-    const client=await pool.connect();
-    try{
-      await client.query("BEGIN");
-      const q=await client.query(`SELECT * FROM orders WHERE id=$1 FOR UPDATE`,[orderId]);
-      const order=q.rows[0];
-      if(!order){await client.query("ROLLBACK");return res.status(404).json({ok:false,message:"Pedido no encontrado"});}
-      if(normalizeOrderStatus(order.status)!=="en_camino"){await client.query("ROLLBACK");return res.status(409).json({ok:false,message:"El pedido todavía no está en camino."});}
-      if(Number(order.delivery_code_attempts||0)>=5){await client.query("ROLLBACK");return res.status(423).json({ok:false,message:"Código bloqueado por demasiados intentos. Contacta al administrador."});}
-      const directCode=String(order.delivery_code||order.delivery_code_plain||"").trim();
-      const valid=directCode ? directCode===code : await verifyPassword(code,order.delivery_code_hash||"");
-      if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[orderId]);await client.query("COMMIT");return res.status(400).json({ok:false,message:"Código incorrecto."});}
-      await client.query(`UPDATE orders SET status='entregado',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[orderId,req.auth.user.id||null]);
+      const orderRow = result.rows[0];
+      if (!orderRow) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ ok: false, message: "Pedido no encontrado" });
+      }
+
+      let deliveryJob = null;
+      if (["aceptado", "preparando", "listo"].includes(normalizedStatus)) {
+        const restaurantResult = await client.query(
+          `SELECT address FROM restaurants WHERE id = $1 OR LOWER(email) = LOWER($2) LIMIT 1`,
+          [orderRow.restaurant_id || "", orderRow.restaurant_email || ""]
+        );
+        const restaurantAddress = restaurantResult.rows[0]?.address || "";
+        const earning = Number(orderRow.driver_earning || 0) || Math.max(1.5, Math.round(Number(orderRow.total || 0) * 0.10 * 100) / 100);
+        const jobId = `job_${Date.now()}_${Math.random().toString(16).slice(2, 12)}`;
+
+        const jobResult = await client.query(
+          `
+          INSERT INTO bhuz_delivery_jobs (
+            id, source_type, source_id, assignment_mode, status, priority,
+            pickup_name, pickup_address,
+            delivery_name, delivery_address, delivery_reference,
+            delivery_latitude, delivery_longitude,
+            service_total, driver_earning, currency,
+            payment_method, payment_received_by, estimated_pickup_at,
+            created_at, updated_at
+          )
+          VALUES (
+            $1, 'FOOD_ORDER', $2, 'OPEN', 'PENDING_ASSIGNMENT', 0,
+            $3, $4,
+            $5, $6, $7,
+            $8, $9,
+            $10, $11, 'USD',
+            $12, 'BHUZ', CASE WHEN $13 = 'listo' THEN NOW() ELSE NULL END,
+            NOW(), NOW()
+          )
+          ON CONFLICT (source_type, source_id) DO UPDATE SET
+            status = CASE
+              WHEN bhuz_delivery_jobs.status IN ('DELIVERED','CANCELLED') THEN bhuz_delivery_jobs.status
+              ELSE bhuz_delivery_jobs.status
+            END,
+            pickup_name = EXCLUDED.pickup_name,
+            pickup_address = EXCLUDED.pickup_address,
+            delivery_name = EXCLUDED.delivery_name,
+            delivery_address = EXCLUDED.delivery_address,
+            delivery_reference = EXCLUDED.delivery_reference,
+            delivery_latitude = EXCLUDED.delivery_latitude,
+            delivery_longitude = EXCLUDED.delivery_longitude,
+            service_total = EXCLUDED.service_total,
+            driver_earning = EXCLUDED.driver_earning,
+            payment_method = EXCLUDED.payment_method,
+            estimated_pickup_at = CASE WHEN $13 = 'listo' THEN NOW() ELSE bhuz_delivery_jobs.estimated_pickup_at END,
+            updated_at = NOW()
+          RETURNING *
+          `,
+          [
+            jobId,
+            orderRow.id,
+            orderRow.restaurant_name || "Restaurante",
+            restaurantAddress,
+            orderRow.customer_name || "Cliente",
+            orderRow.delivery_address || orderRow.customer_address || "",
+            orderRow.delivery_reference || "",
+            orderRow.latitude || null,
+            orderRow.longitude || null,
+            Number(orderRow.total || 0),
+            earning,
+            orderRow.payment_method || "",
+            normalizedStatus
+          ]
+        );
+
+        deliveryJob = jobResult.rows[0] || null;
+        await client.query(
+          `UPDATE orders SET delivery_status = CASE WHEN delivery_status IN ('ASSIGNED','GOING_TO_PICKUP','PICKED_UP','GOING_TO_DELIVERY','DELIVERED') THEN delivery_status ELSE 'PENDING_ASSIGNMENT' END, delivery_job_id = $2, driver_earning = $3, updated_at = NOW() WHERE id = $1`,
+          [orderRow.id, deliveryJob?.id || null, earning]
+        );
+      }
+
       await client.query("COMMIT");
-      const updated=await getOrderByIdFromPostgres(orderId);
-      sendOrderStatus(pool,{...updated,customer_email:updated.customerEmail},"Pedido entregado","Tu pedido fue entregado. ¡Buen provecho!").catch(()=>{});
-      res.json({ok:true,message:"Entrega confirmada correctamente",order:updated});
-    }catch(error){await client.query("ROLLBACK");res.status(500).json({ok:false,message:"No se pudo confirmar la entrega",error:error.message});}
-    finally{client.release();}
+      const order = await getOrderByIdFromPostgres(orderId);
+
+      return res.json({
+        ok: true,
+        source: "postgres",
+        message: "Estado actualizado correctamente",
+        order,
+        deliveryJob
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Error actualizando estado del pedido en PostgreSQL:", error.message);
+      return res.status(500).json({
+        ok: false,
+        message: "Error actualizando estado del pedido en PostgreSQL",
+        error: error.message
+      });
+    } finally {
+      client.release();
+    }
   });
 
   return router;
 }
-module.exports=crearRutasPedidos;
+
+module.exports = crearRutasPedidos;
+

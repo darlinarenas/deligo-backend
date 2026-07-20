@@ -1,4 +1,3 @@
-const { hashPassword, verifyAndUpgradePassword } = require("../utils/passwords");
 const express = require("express");
 
 /* ======================================================
@@ -126,7 +125,7 @@ function crearRutasAuth(dependencias) {
         address: normalizeText(address),
         phone: normalizeText(phone),
         email: normalizedEmail,
-        password: await hashPassword(password),
+        password: String(password),
         role: "customer",
         status: "active",
         reference: normalizeText(reference),
@@ -289,7 +288,7 @@ function crearRutasAuth(dependencias) {
           generateId("restaurant"),
           normalizeText(name),
           normalizedEmail,
-          await hashPassword(password),
+          String(password),
           normalizeText(phone),
           normalizeText(address),
           "restaurant",
@@ -341,22 +340,13 @@ function crearRutasAuth(dependencias) {
         normalizedRole === "restaurant" ||
         normalizedRole === "restaurante"
       ) {
-        const rawRestaurantResult = await pool.query(
-          `SELECT * FROM restaurants WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-          [normalizedEmail]
-        );
-        const rawRestaurant = rawRestaurantResult.rows[0];
-        const validPassword = rawRestaurant && await verifyAndUpgradePassword({
-          password,
-          storedPassword: rawRestaurant.password,
-          onUpgrade: (hash) => pool.query(
-            `UPDATE restaurants SET password = $1, updated_at = NOW() WHERE id = $2`,
-            [hash, rawRestaurant.id]
-          )
-        });
-        const restaurant = rawRestaurant ? mapDbRestaurant(rawRestaurant) : null;
+        const restaurant =
+          await getRestaurantByEmailFromPostgres(normalizedEmail);
 
-        if (!restaurant || !validPassword) {
+        if (
+          !restaurant ||
+          String(restaurant.password) !== String(password)
+        ) {
           return res.status(401).json({
             ok: false,
             message: "Datos inválidos para restaurante"
@@ -391,22 +381,10 @@ function crearRutasAuth(dependencias) {
         });
       }
 
-      const rawUserResult = await pool.query(
-        `SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-        [normalizedEmail]
-      );
-      const rawUser = rawUserResult.rows[0];
-      const validPassword = rawUser && await verifyAndUpgradePassword({
-        password,
-        storedPassword: rawUser.password,
-        onUpgrade: (hash) => pool.query(
-          `UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`,
-          [hash, rawUser.id]
-        )
-      });
-      const user = rawUser ? mapDbUser(rawUser) : null;
+      const user =
+        await getUserByEmailFromPostgres(normalizedEmail);
 
-      if (!user || !validPassword) {
+      if (!user || String(user.password) !== String(password)) {
         return res.status(401).json({
           ok: false,
           message: "Correo o contraseña incorrectos"

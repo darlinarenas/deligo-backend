@@ -1,6 +1,4 @@
-const { hashPassword, verifyAndUpgradePassword } = require("../utils/passwords");
 const express = require('express');
-const { verifyPassword } = require('../utils/passwords');
 const crypto = require('crypto');
 const { sendOrderStatus, sendServiceStatus } = require('../utils/push-notifications');
 
@@ -161,7 +159,7 @@ module.exports = function crearRutasDrivers({ pool }) {
       if(exists.rows[0]) return res.status(409).json({ok:false,message:'Ya existe un repartidor con ese correo.'});
       const driverId=id('driver');
       const q=await pool.query(`INSERT INTO bhuz_drivers(id,full_name,email,password,phone,identity_document,address,country_code,city,zone,vehicle_type,vehicle_brand,vehicle_model,vehicle_plate,vehicle_color,emergency_contact,administrative_status)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'PENDING') RETURNING *`,[driverId,b.fullName,e,await hashPassword(String(b.password)),b.phone,b.identityDocument||null,b.address||null,b.countryCode||'VE',b.city||'Punto Fijo',b.zone||null,b.vehicleType||'Moto',b.vehicleBrand||null,b.vehicleModel||null,b.vehiclePlate||null,b.vehicleColor||null,b.emergencyContact||null]);
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'PENDING') RETURNING *`,[driverId,b.fullName,e,String(b.password),b.phone,b.identityDocument||null,b.address||null,b.countryCode||'VE',b.city||'Punto Fijo',b.zone||null,b.vehicleType||'Moto',b.vehicleBrand||null,b.vehicleModel||null,b.vehiclePlate||null,b.vehicleColor||null,b.emergencyContact||null]);
       res.status(201).json({ok:true,driver:mapDriver(q.rows[0]),message:'Registro creado. Pendiente de aprobación.'});
     } catch(err){ console.error(err); res.status(500).json({ok:false,message:'No se pudo registrar el repartidor.'}); }
   });
@@ -169,8 +167,7 @@ module.exports = function crearRutasDrivers({ pool }) {
   r.post('/login', async(req,res)=>{
     try { await ensureDriverSchema(); const e=email(req.body?.email); const p=String(req.body?.password||'');
       const q=await pool.query('SELECT * FROM bhuz_drivers WHERE LOWER(email)=LOWER($1)',[e]); const d=q.rows[0];
-      const validPassword=d && await verifyAndUpgradePassword({password:p,storedPassword:d.password,onUpgrade:(hash)=>pool.query('UPDATE bhuz_drivers SET password=$1,updated_at=NOW() WHERE id=$2',[hash,d.id])});
-      if(!d || !validPassword) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
+      if(!d || String(d.password||'')!==p) return res.status(401).json({ok:false,message:'Credenciales incorrectas.'});
       if(d.administrative_status==='PENDING') return res.status(403).json({ok:false,message:'Tu cuenta está pendiente de aprobación administrativa.'});
       if(['BLOCKED','REJECTED','SUSPENDED'].includes(d.administrative_status)) return res.status(403).json({ok:false,message:`Cuenta ${d.administrative_status.toLowerCase()}.`});
       await pool.query("UPDATE bhuz_drivers SET last_seen_at=NOW(),session_active=TRUE,is_available=FALSE,operational_status='OFFLINE',inactivity_prompt_at=NULL,inactivity_deadline_at=NULL,updated_at=NOW() WHERE id=$1",[d.id]);
@@ -297,9 +294,9 @@ module.exports = function crearRutasDrivers({ pool }) {
     const allowed={ASSIGNED:['GOING_TO_PICKUP'],GOING_TO_PICKUP:['ARRIVED_AT_PICKUP','PICKED_UP'],ARRIVED_AT_PICKUP:['PICKED_UP'],PICKED_UP:['GOING_TO_DELIVERY'],GOING_TO_DELIVERY:['ARRIVED_AT_DELIVERY','DELIVERED'],ARRIVED_AT_DELIVERY:['DELIVERED']};
     const client=await pool.connect(); try {await client.query('BEGIN'); const job=(await client.query('SELECT * FROM bhuz_delivery_jobs WHERE id=$1 AND driver_id=$2 FOR UPDATE',[req.params.jobId,req.params.driverId])).rows[0];
       if(!job) throw new Error('Tarea no encontrada.'); if(!(allowed[job.status]||[]).includes(next)) { await client.query('ROLLBACK'); return res.status(409).json({ok:false,message:`Transición inválida: ${job.status} → ${next}`}); }
-      if(['PACKAGE','FOOD_ORDER'].includes(job.source_type) && next==='DELIVERED') {
+      if(job.source_type==='PACKAGE' && next==='DELIVERED') {
         await client.query('ROLLBACK');
-        return res.status(409).json({ok:false,message:'Para cerrar la entrega debes ingresar el código de 6 dígitos del cliente.'});
+        return res.status(409).json({ok:false,message:'Para cerrar un paquete debes ingresar el código de 6 dígitos del receptor.'});
       }
       const delivered=next==='DELIVERED'; const q=await client.query(`UPDATE bhuz_delivery_jobs SET status=$3,picked_up_at=CASE WHEN $3='PICKED_UP' THEN NOW() ELSE picked_up_at END,delivered_at=CASE WHEN $3='DELIVERED' THEN NOW() ELSE delivered_at END,updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId,next]);
       if(job.source_type==='PACKAGE') { const sm={GOING_TO_PICKUP:'GOING_TO_PICKUP',PICKED_UP:'PACKAGE_PICKED',GOING_TO_DELIVERY:'GOING_TO_DELIVERY'}; if(sm[next]) await client.query('UPDATE bhuz_services SET status=$2,updated_at=NOW() WHERE id=$1',[job.source_id,sm[next]]); }
@@ -324,23 +321,8 @@ module.exports = function crearRutasDrivers({ pool }) {
       await client.query('BEGIN');
       const job=(await client.query('SELECT * FROM bhuz_delivery_jobs WHERE id=$1 AND driver_id=$2 FOR UPDATE',[req.params.jobId,req.params.driverId])).rows[0];
       if(!job){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Tarea no encontrada.'});}
-      if(!['PACKAGE','FOOD_ORDER'].includes(job.source_type)){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este servicio no admite confirmación por código.'});}
+      if(job.source_type!=='PACKAGE'){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este servicio no requiere código de paquete.'});}
       if(!['GOING_TO_DELIVERY','ARRIVED_AT_DELIVERY'].includes(job.status)){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Primero debes llegar al destino para confirmar la entrega.'});}
-      if(job.source_type==='FOOD_ORDER'){
-        const order=(await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[job.source_id])).rows[0];
-        if(!order){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Pedido no encontrado.'});}
-        if(order.delivery_code_verified_at){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este código ya fue utilizado.'});}
-        if(Number(order.delivery_code_attempts||0)>=5){await client.query('ROLLBACK');return res.status(423).json({ok:false,message:'Código bloqueado. Contacta al administrador.'});}
-        const directCode=String(order.delivery_code||order.delivery_code_plain||'').trim();
-        const valid=directCode ? directCode===deliveryCode : await verifyPassword(deliveryCode,order.delivery_code_hash||'');
-        if(!valid){await client.query(`UPDATE orders SET delivery_code_attempts=COALESCE(delivery_code_attempts,0)+1,updated_at=NOW() WHERE id=$1`,[order.id]);await client.query('COMMIT');return res.status(400).json({ok:false,message:'Código incorrecto.'});}
-        const q=await client.query(`UPDATE bhuz_delivery_jobs SET status='DELIVERED',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND driver_id=$2 RETURNING *`,[job.id,req.params.driverId]);
-        await client.query(`UPDATE orders SET status='entregado',delivery_status='DELIVERED',delivery_code_verified_at=NOW(),delivered_by_driver_id=$2,updated_at=NOW() WHERE id=$1`,[order.id,req.params.driverId]);
-        await client.query(`UPDATE bhuz_drivers SET operational_status='AVAILABLE',is_available=TRUE,completed_deliveries=completed_deliveries+1,updated_at=NOW() WHERE id=$1`,[req.params.driverId]);
-        await client.query('COMMIT');
-        try{const updated=(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0];await sendOrderStatus(pool,updated,'Pedido entregado','Tu pedido fue entregado. ¡Buen provecho!')}catch(pushErr){console.warn('Push omitido:',pushErr.message)}
-        return res.json({ok:true,message:'Entrega confirmada correctamente.',job:q.rows[0]});
-      }
       const service=(await client.query('SELECT * FROM bhuz_services WHERE id=$1 FOR UPDATE',[job.source_id])).rows[0];
       if(!service){await client.query('ROLLBACK');return res.status(404).json({ok:false,message:'Envío no encontrado.'});}
       if(service.delivery_code_used===true){await client.query('ROLLBACK');return res.status(409).json({ok:false,message:'Este código ya fue utilizado.'});}
