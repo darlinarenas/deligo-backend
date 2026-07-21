@@ -150,6 +150,8 @@ function crearRutasPedidos(dependencias) {
         UPDATE orders
         SET
           status = $1,
+          accepted_at = CASE WHEN $1 = 'aceptado' THEN COALESCE(accepted_at, NOW()) ELSE accepted_at END,
+          preparing_at = CASE WHEN $1 = 'preparando' THEN COALESCE(preparing_at, NOW()) ELSE preparing_at END,
           ready_at = CASE WHEN $1 = 'listo' THEN COALESCE(ready_at, NOW()) ELSE ready_at END,
           updated_at = NOW()
         WHERE id = $2

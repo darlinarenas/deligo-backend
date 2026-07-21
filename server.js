@@ -975,6 +975,11 @@ function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
     date: orderRow.date_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleDateString("es-VE") : ""),
     time: orderRow.time_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" }) : ""),
     createdAt: orderRow.created_at ? new Date(orderRow.created_at).toISOString() : "",
+    acceptedAt: orderRow.accepted_at ? new Date(orderRow.accepted_at).toISOString() : "",
+    preparingAt: orderRow.preparing_at ? new Date(orderRow.preparing_at).toISOString() : "",
+    readyAt: orderRow.ready_at ? new Date(orderRow.ready_at).toISOString() : "",
+    enRouteAt: orderRow.en_route_at ? new Date(orderRow.en_route_at).toISOString() : "",
+    deliveredAt: orderRow.delivered_at ? new Date(orderRow.delivered_at).toISOString() : "",
     deliveryCode: orderRow.delivery_code || "",
     deliveryCodeUsed: orderRow.delivery_code_used === true,
     updatedAt: orderRow.updated_at ? new Date(orderRow.updated_at).toISOString() : ""
