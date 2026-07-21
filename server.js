@@ -28,6 +28,7 @@ const crearRutasServices = require("./routes/services.routes");
 const crearRutasDrivers = require("./routes/drivers.routes");
 const crearRutasTracking = require("./routes/tracking.routes");
 const crearRutasRatings = require("./routes/ratings.routes");
+const { generarCodigoEntrega } = require("./utils/services.helpers");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -140,6 +141,8 @@ async function initDatabaseTables() {
         longitude TEXT,
         date_text TEXT,
         time_text TEXT,
+        delivery_code VARCHAR(6),
+        delivery_code_used BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
@@ -972,6 +975,8 @@ function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
     date: orderRow.date_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleDateString("es-VE") : ""),
     time: orderRow.time_text || (orderRow.created_at ? new Date(orderRow.created_at).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" }) : ""),
     createdAt: orderRow.created_at ? new Date(orderRow.created_at).toISOString() : "",
+    deliveryCode: orderRow.delivery_code || "",
+    deliveryCodeUsed: orderRow.delivery_code_used === true,
     updatedAt: orderRow.updated_at ? new Date(orderRow.updated_at).toISOString() : ""
   };
 }
@@ -1193,6 +1198,7 @@ async function createOrderInPostgres(body) {
     const calculatedTotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
     const total = toNumberValue(body.total, calculatedTotal);
     const createdAt = toDateValue(body.createdAt) || new Date().toISOString();
+    const deliveryCode = generarCodigoEntrega();
 
     await client.query(
       `
@@ -1200,9 +1206,9 @@ async function createOrderInPostgres(body) {
         id, user_id, customer_email, customer_name, customer_phone, customer_address,
         restaurant_id, restaurant_email, restaurant_name, status, total,
         payment_method, payment_status, notes, delivery_address, delivery_reference,
-        latitude, longitude, date_text, time_text, created_at, updated_at
+        latitude, longitude, date_text, time_text, delivery_code, delivery_code_used, created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,FALSE,$22,NOW())
       RETURNING *
       `,
       [
@@ -1226,6 +1232,7 @@ async function createOrderInPostgres(body) {
         normalizeText(body.longitude || body.location?.lng || customer.location?.lng || ""),
         normalizeText(body.date || new Date(createdAt).toLocaleDateString("es-VE")),
         normalizeText(body.time || new Date(createdAt).toLocaleTimeString("es-VE", { hour: "2-digit", minute: "2-digit" })),
+        deliveryCode,
         createdAt
       ]
     );
