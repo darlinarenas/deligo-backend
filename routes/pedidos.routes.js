@@ -127,13 +127,15 @@ function crearRutasPedidos(dependencias) {
     const orderId = String(req.params.id || "").trim();
     const normalizedStatus = normalizeOrderStatus(req.body?.status);
 
+    // El restaurante controla el pedido únicamente hasta confirmar
+    // que fue retirado. Desde ese punto, el repartidor controla
+    // "en_camino" y "entregado" desde su propio módulo.
     const validStatuses = [
       "pendiente",
       "aceptado",
       "preparando",
       "listo",
-      "en_camino",
-      "entregado"
+      "retirado"
     ];
 
     if (!validStatuses.includes(normalizedStatus)) {
@@ -153,6 +155,7 @@ function crearRutasPedidos(dependencias) {
           accepted_at = CASE WHEN $1 = 'aceptado' THEN COALESCE(accepted_at, NOW()) ELSE accepted_at END,
           preparing_at = CASE WHEN $1 = 'preparando' THEN COALESCE(preparing_at, NOW()) ELSE preparing_at END,
           ready_at = CASE WHEN $1 = 'listo' THEN COALESCE(ready_at, NOW()) ELSE ready_at END,
+          picked_up_at = CASE WHEN $1 = 'retirado' THEN COALESCE(picked_up_at, NOW()) ELSE picked_up_at END,
           updated_at = NOW()
         WHERE id = $2
         RETURNING *
@@ -167,6 +170,63 @@ function crearRutasPedidos(dependencias) {
       }
 
       let deliveryJob = null;
+
+      if (normalizedStatus === "retirado") {
+        const jobResult = await client.query(
+          `
+          SELECT *
+          FROM bhuz_delivery_jobs
+          WHERE source_type = 'FOOD_ORDER' AND source_id = $1
+          FOR UPDATE
+          `,
+          [orderRow.id]
+        );
+
+        const job = jobResult.rows[0];
+        if (!job || !job.driver_id) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            ok: false,
+            message: "El pedido todavía no tiene un repartidor asignado."
+          });
+        }
+
+        if (!["ASSIGNED", "GOING_TO_PICKUP", "ARRIVED_AT_PICKUP", "PICKED_UP"].includes(job.status)) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            ok: false,
+            message: "El pedido no puede marcarse como retirado en su estado actual."
+          });
+        }
+
+        const updatedJob = await client.query(
+          `
+          UPDATE bhuz_delivery_jobs
+          SET
+            status = 'PICKED_UP',
+            picked_up_at = COALESCE(picked_up_at, NOW()),
+            updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+          `,
+          [job.id]
+        );
+
+        deliveryJob = updatedJob.rows[0] || null;
+
+        await client.query(
+          `
+          UPDATE orders
+          SET
+            delivery_status = 'PICKED_UP',
+            picked_up_at = COALESCE(picked_up_at, NOW()),
+            updated_at = NOW()
+          WHERE id = $1
+          `,
+          [orderRow.id]
+        );
+      }
+
       if (["aceptado", "preparando", "listo"].includes(normalizedStatus)) {
         const restaurantResult = await client.query(
           `SELECT address FROM restaurants WHERE id = $1 OR LOWER(email) = LOWER($2) LIMIT 1`,

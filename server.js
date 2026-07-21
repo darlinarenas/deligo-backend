@@ -978,6 +978,7 @@ function buildCompatibleOrderFromRow(orderRow, itemRows = []) {
     acceptedAt: orderRow.accepted_at ? new Date(orderRow.accepted_at).toISOString() : "",
     preparingAt: orderRow.preparing_at ? new Date(orderRow.preparing_at).toISOString() : "",
     readyAt: orderRow.ready_at ? new Date(orderRow.ready_at).toISOString() : "",
+    pickedUpAt: orderRow.picked_up_at ? new Date(orderRow.picked_up_at).toISOString() : "",
     enRouteAt: orderRow.en_route_at ? new Date(orderRow.en_route_at).toISOString() : "",
     deliveredAt: orderRow.delivered_at ? new Date(orderRow.delivered_at).toISOString() : "",
     deliveryCode: orderRow.delivery_code || "",
